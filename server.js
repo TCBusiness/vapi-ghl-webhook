@@ -1,4 +1,4 @@
-{ app.post("/vapi-webhook", async (req, res) => {
+app.post("/vapi-webhook", async (req, res) => {
   console.log("✅ Webhook received from Vapi");
 
   // Respond immediately (prevents timeout)
@@ -37,4 +37,4 @@
   } catch (err) {
     console.error("❌ Webhook processing error:", err);
   }
-});;
+});
