@@ -1,3 +1,18 @@
+const express = require("express");
+const axios = require("axios");
+
+const app = express();
+app.use(express.json());
+
+const PORT = process.env.PORT || 3000;
+
+const GHL_API_KEY = process.env.GHL_API_KEY;
+const GHL_LOCATION_ID = process.env.GHL_LOCATION_ID;
+
+/* =====================================================
+   ✅ VAPI WEBHOOK
+===================================================== */
+
 app.post("/vapi-webhook", async (req, res) => {
   console.log("✅ Webhook received from Vapi");
 
@@ -38,3 +53,75 @@ app.post("/vapi-webhook", async (req, res) => {
     console.error("❌ Webhook processing error:", err);
   }
 });
+
+/* =====================================================
+   ✅ SEND SMS VIA GHL
+===================================================== */
+
+async function sendFollowUpSMS(phone) {
+  try {
+    const contactResponse = await axios.get(
+      "https://services.leadconnectorhq.com/contacts/search/duplicate",
+      {
+        headers: {
+          Authorization: `Bearer ${GHL_API_KEY}`,
+          Version: "2021-07-28",
+        },
+        params: {
+          locationId: GHL_LOCATION_ID,
+          number: phone,
+        },
+      }
+    );
+
+    const contact = contactResponse.data.contact;
+
+    if (!contact) {
+      console.log("❌ Contact not found in GHL.");
+      return;
+    }
+
+    console.log("✅ Contact found:", contact.id);
+
+    await axios.post(
+      "https://services.leadconnectorhq.com/conversations/messages",
+      {
+        type: "SMS",
+        contactId: contact.id,
+        message:
+          "Hi 👋 It looks like your call ended before booking was completed. You can schedule here: https://YOUR_BOOKING_LINK.com",
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${GHL_API_KEY}`,
+          Version: "2021-07-28",
+          "Content-Type": "application/json",
+        },
+      }
+    );
+
+    console.log("✅ SMS sent successfully");
+
+  } catch (error) {
+    console.error(
+      "❌ Error sending SMS:",
+      error.response?.data || error.message
+    );
+  }
+}
+
+/* =====================================================
+   ✅ HEALTH CHECK
+===================================================== */
+
+app.get("/health", (req, res) => {
+  res.status(200).send("OK");
+});
+
+/* =====================================================
+   ✅ START SERVER
+===================================================== */
+
+app.listen(PORT, () => {
+  console.log(`🚀 Server running on port ${PORT}`);
+});;
