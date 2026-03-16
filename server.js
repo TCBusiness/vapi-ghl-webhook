@@ -38,11 +38,10 @@ app.post("/vapi-webhook", async (req, res) => {
       return;
     }
 
-    const phone = body.message.call?.customer?.number;
-
-    if (!phone) {
-      console.log("❌ No phone number found in payload.");
-      return;
+    const phone =
+  body.message.call?.customer?.number ||
+  body.message.customer?.number ||
+  body.customer?.number;
     }
 
     console.log("⚠️ No appointment created. Sending follow-up SMS to:", phone);
