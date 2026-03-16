@@ -8,66 +8,29 @@ const GHL_API_KEY = process.env.GHL_API_KEY;
 const GHL_LOCATION_ID = process.env.GHL_LOCATION_ID;
 
 app.post("/vapi-webhook", async (req, res) => {
+  console.log("✅ Webhook recibido de Vapi");
+
+  // ✅ RESPONDER INMEDIATAMENTE
+  res.status(200).json({ received: true });
+
+  // ✅ PROCESAR EN BACKGROUND
   try {
     const body = req.body;
 
-    console.log("Incoming webhook:", body?.type);
+    if (body.message?.type !== "end-of-call-report") return;
 
-    if (body.type !== "end-of-call-report") {
-      return res.sendStatus(200);
+    const success = body.message.analysis?.successEvaluation === "true";
+
+    if (success) {
+      console.log("✅ Appointment creado. No se envía SMS.");
+      return;
     }
 
-    const phone = body.call?.customer?.number;
-    if (!phone) return res.sendStatus(200);
+    console.log("⚠️ No hubo appointment. Enviando SMS...");
 
-    // ✅ Buscar contacto en GHL
-    const search = await fetch(
-      `https://services.leadconnectorhq.com/contacts/?locationId=${GHL_LOCATION_ID}&query=${encodeURIComponent(phone)}`,
-      {
-        headers: {
-          Authorization: `Bearer ${GHL_API_KEY}`,
-          Version: "2021-07-28"
-        }
-      }
-    );
+    await sendSMSLogic(body); // tu función actual que llama GHL
 
-    const data = await search.json();
-    const contact = data.contacts?.[0];
-    if (!contact) {
-      console.log("No contact found for phone:", phone);
-      return res.sendStatus(200);
-    }
-
-    const message =
-      "Hi there, it looks like we weren’t able to finish your appointment by phone. Reply here and I can help you continue booking.";
-
-    // ✅ Enviar SMS
-    await fetch(
-      "https://services.leadconnectorhq.com/conversations/messages",
-      {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${GHL_API_KEY}`,
-          Version: "2021-07-28",
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify({
-          type: "SMS",
-          contactId: contact.id,
-          message
-        })
-      }
-    );
-
-    console.log("SMS sent to:", phone);
-
-    res.sendStatus(200);
-  } catch (err) {
-    console.error("Webhook error:", err);
-    res.sendStatus(500);
+  } catch (error) {
+    console.error("❌ Error procesando webhook:", error);
   }
 });
-
-// ✅ CRÍTICO PARA RENDER
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log("Webhook running on port", PORT));
