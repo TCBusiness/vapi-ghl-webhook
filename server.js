@@ -1,28 +1,27 @@
-{ const express = require("express");
+const express = require("express");
 const axios = require("axios");
 
 const app = express();
 app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
-
 const GHL_API_KEY = process.env.GHL_API_KEY;
 const GHL_LOCATION_ID = process.env.GHL_LOCATION_ID;
 
-/* =====================================================
-   ✅ HEALTH CHECK (prevents Render issues)
-===================================================== */
+/* ===========================
+   HEALTH CHECK
+=========================== */
 app.get("/health", (req, res) => {
   res.status(200).send("OK");
 });
 
-/* =====================================================
-   ✅ VAPI WEBHOOK
-===================================================== */
+/* ===========================
+   VAPI WEBHOOK
+=========================== */
 app.post("/vapi-webhook", async (req, res) => {
   console.log("✅ Webhook received");
 
-  // Respond immediately (prevents Vapi timeout)
+  // Respond immediately to prevent timeout
   res.status(200).json({ received: true });
 
   try {
@@ -60,9 +59,9 @@ app.post("/vapi-webhook", async (req, res) => {
   }
 });
 
-/* =====================================================
-   ✅ SEND FOLLOW-UP SMS VIA GHL
-===================================================== */
+/* ===========================
+   SEND SMS FUNCTION
+=========================== */
 async function sendFollowUpSMS(phone) {
   try {
     const contactResponse = await axios.get(
@@ -115,9 +114,9 @@ async function sendFollowUpSMS(phone) {
   }
 }
 
-/* =====================================================
-   ✅ START SERVER
-===================================================== */
+/* ===========================
+   START SERVER
+=========================== */
 app.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
 });
