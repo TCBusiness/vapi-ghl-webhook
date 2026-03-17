@@ -1,4 +1,4 @@
-{ const express = require("express");
+const express = require("express");
 const axios = require("axios");
 
 const app = express();
@@ -21,7 +21,6 @@ app.get("/health", (req, res) => {
 app.post("/vapi-webhook", async (req, res) => {
   console.log("✅ Webhook received");
 
-  // Respond immediately to prevent timeout
   res.status(200).json({ received: true });
 
   try {
