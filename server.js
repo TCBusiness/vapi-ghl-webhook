@@ -10,19 +10,25 @@ const GHL_API_KEY = process.env.GHL_API_KEY;
 const GHL_LOCATION_ID = process.env.GHL_LOCATION_ID;
 
 /* =====================================================
+   ✅ HEALTH CHECK (prevents Render issues)
+===================================================== */
+app.get("/health", (req, res) => {
+  res.status(200).send("OK");
+});
+
+/* =====================================================
    ✅ VAPI WEBHOOK
 ===================================================== */
-
 app.post("/vapi-webhook", async (req, res) => {
-  console.log("✅ Webhook received from Vapi");
+  console.log("✅ Webhook received");
 
-  // Respond immediately (prevents timeout)
+  // Respond immediately (prevents Vapi timeout)
   res.status(200).json({ received: true });
 
   try {
     const body = req.body;
 
-    console.log("📦 Full payload:", JSON.stringify(body, null, 2));
+    console.log("📦 Payload:", JSON.stringify(body, null, 2));
 
     const phone =
       body.message?.call?.customer?.number ||
@@ -32,7 +38,7 @@ app.post("/vapi-webhook", async (req, res) => {
     console.log("📞 Extracted phone:", phone);
 
     if (!phone) {
-      console.log("❌ No phone number found.");
+      console.log("❌ No phone number found");
       return;
     }
 
@@ -50,14 +56,13 @@ app.post("/vapi-webhook", async (req, res) => {
     await sendFollowUpSMS(phone);
 
   } catch (err) {
-    console.error("❌ Webhook processing error:", err);
+    console.error("❌ Webhook error:", err.message);
   }
 });
 
 /* =====================================================
-   ✅ SEND SMS VIA GHL
+   ✅ SEND FOLLOW-UP SMS VIA GHL
 ===================================================== */
-
 async function sendFollowUpSMS(phone) {
   try {
     const contactResponse = await axios.get(
@@ -77,7 +82,7 @@ async function sendFollowUpSMS(phone) {
     const contact = contactResponse.data.contact;
 
     if (!contact) {
-      console.log("❌ Contact not found in GHL.");
+      console.log("❌ Contact not found in GHL");
       return;
     }
 
@@ -104,24 +109,15 @@ async function sendFollowUpSMS(phone) {
 
   } catch (error) {
     console.error(
-      "❌ Error sending SMS:",
+      "❌ GHL error:",
       error.response?.data || error.message
     );
   }
 }
 
 /* =====================================================
-   ✅ HEALTH CHECK
-===================================================== */
-
-app.get("/health", (req, res) => {
-  res.status(200).send("OK");
-});
-
-/* =====================================================
    ✅ START SERVER
 ===================================================== */
-
 app.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
-});;
+});
