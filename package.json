@@ -1,4 +1,4 @@
-   "name": "vapi-ghl-webhook",
+{  "name": "vapi-ghl-webhook",
   "version": "1.0.0",
   "description": "Vapi webhook to send follow-up SMS via GHL",
   "main": "server.js",
