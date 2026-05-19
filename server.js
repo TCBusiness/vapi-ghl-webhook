@@ -57,6 +57,70 @@ app.post("/vapi-webhook", async (req, res) => {
     console.error("❌ Webhook error:", err.message);
   }
 });
+/* ===========================
+   VAPI TOOL CALLS (LIVE)
+=========================== */
+app.post("/tool-calls", async (req, res) => {
+  try {
+    const body = req.body;
+
+    const toolCalls = body?.message?.toolCallList || [];
+    if (!toolCalls.length) {
+      return res.status(200).json({ results: [] });
+    }
+
+    const results = [];
+
+    for (const tc of toolCalls) {
+      const toolCallId = tc.toolCallId;
+      const name = tc.function?.name;
+      const args = tc.function?.arguments || {};
+
+      if (!toolCallId || !name) continue;
+
+      if (name === "parse_datetime_ny") {
+        results.push({
+          toolCallId,
+          result: {
+            success: false,
+            error: "parse_datetime_ny not implemented yet",
+            receivedArgs: args
+          }
+        });
+        continue;
+      }
+
+      if (name === "ghl_availability_day") {
+        results.push({
+          toolCallId,
+          result: {
+            success: false,
+            error: "ghl_availability_day not implemented yet",
+            receivedArgs: args
+          }
+        });
+        continue;
+      }
+
+      results.push({
+        toolCallId,
+        result: { success: false, error: `Unknown tool: ${name}` }
+      });
+    }
+
+    return res.status(200).json({ results });
+  } catch (err) {
+    console.error("❌ /tool-calls error:", err.message);
+    return res.status(200).json({
+      results: [
+        {
+          toolCallId: req.body?.message?.toolCallList?.[0]?.toolCallId,
+          result: { success: false, error: err.message }
+        }
+      ]
+    });
+  }
+});
 
 /* ===========================
    SEND SMS FUNCTION
