@@ -78,123 +78,198 @@ app.post("/tool-calls", async (req, res) => {
 
       if (!toolCallId || !name) continue;
 
+      console.log("🛠️ Tool call:", name, "args:", JSON.stringify(args));
+
+      /* ---------------------------
+         1) parse_datetime_ny
+      --------------------------- */
       if (name === "parse_datetime_ny") {
+        const text = (args.text || "").toString();
+        const timezone = (args.timezone || "America/New_York").toString();
+
+        const addDays = (d, n) => {
+          const x = new Date(d.getTime());
+          x.setDate(x.getDate() + n);
+          return x;
+        };
+
+        const lower = text.toLowerCase();
+        const now = new Date();
+
+        // Determine target day
+        let target = now;
+
+        const daysMap = {
+          domingo: 0, sunday: 0,
+          lunes: 1, monday: 1,
+          martes: 2, tuesday: 2,
+          miercoles: 3, miércoles: 3, wednesday: 3,
+          jueves: 4, thursday: 4,
+          viernes: 5, friday: 5,
+          sabado: 6, sábado: 6, saturday: 6,
+        };
+
+        if (lower.includes("mañana") || lower.includes("tomorrow")) {
+          target = addDays(now, 1);
+        } else {
+          const found = Object.keys(daysMap).find(k => lower.includes(k));
+          if (found) {
+            const desired = daysMap[found];
+
+            // get current weekday in target timezone
+            const currentWeekdayShort = new Intl.DateTimeFormat("en-US", {
+              timeZone: timezone,
+              weekday: "short",
+            }).format(now);
+
+            // Map short weekday to number (Sun=0..Sat=6)
+            const shortMap = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
+            const currentDow = shortMap[currentWeekdayShort] ?? new Date().getDay();
+
+            let delta = (desired - currentDow + 7) % 7;
+            if (delta === 0) delta = 7; // "next Monday" behavior
+            target = addDays(now, delta);
+          }
+        }
+
+        // Determine hour/minute
+        let hour = null;
+        let minute = 0;
+
+        const hm = lower.match(/\b(\d{1,2})\s*[:h]\s*(\d{2})\b/); // 18:30, 6:30, 18h30
+        if (hm) {
+          hour = parseInt(hm[1], 10);
+          minute = parseInt(hm[2], 10);
+        } else {
+          const h = lower.match(/\b(\d{1,2})\b/);
+          if (h) hour = parseInt(h[1], 10);
+        }
+
+        const hasPM =
+          lower.includes("pm") ||
+          lower.includes("tarde") ||
+          lower.includes("noche") ||
+          lower.includes("evening");
+
+        const hasAM =
+          lower.includes("am") ||
+          lower.includes("morning");
+
+        if (hour !== null) {
+          if (hasPM && hour < 12) hour += 12;
+          if (hasAM && hour === 12) hour = 0;
+        }
+
+        // Format date in timezone as MM-DD-YYYY
+        const parts = new Intl.DateTimeFormat("en-US", {
+          timeZone: timezone,
+          year: "numeric",
+          month: "2-digit",
+          day: "2-digit",
+        }).formatToParts(target);
+
+        const mm = parts.find(p => p.type === "month")?.value;
+        const dd = parts.find(p => p.type === "day")?.value;
+        const yyyy = parts.find(p => p.type === "year")?.value;
+
+        const dateMMDDYYYY = `${mm}-${dd}-${yyyy}`;
+
         results.push({
           toolCallId,
           result: {
-            success: false,
-            error: "parse_datetime_ny not implemented yet",
-            receivedArgs: args
-          }
+            success: true,
+            timezone,
+            originalText: text,
+            dateMMDDYYYY,
+            preferredTime: hour === null ? null : { hour, minute },
+          },
         });
         continue;
       }
 
-      if (name === "parse_datetime_ny") {
-  const text = (args.text || "").toString();
-  const timezone = (args.timezone || "America/New_York").toString();
+      /* ---------------------------
+         2) ghl_availability_day
+      --------------------------- */
+      if (name === "ghl_availability_day") {
+        const calendarId = (args.calendarId || "").toString();
+        const dateText = (args.dateText || "").toString();
+        const timezone = (args.timezone || "America/New_York").toString();
+        const durationMinutes = Number(args.durationMinutes || 60);
 
-  // Very simple parser: handles "mañana" / "tomorrow" and "lunes" / "monday"
-  // and common times like "6", "6pm", "6 pm", "18:00", "6 de la tarde".
-  // (We can expand after first test.)
+        if (!calendarId || !dateText || !durationMinutes) {
+          results.push({
+            toolCallId,
+            result: {
+              success: false,
+              error: "Missing required params: calendarId, dateText, durationMinutes",
+              receivedArgs: args,
+            },
+          });
+          continue;
+        }
 
-  const now = new Date();
-  const fmtDate = new Intl.DateTimeFormat("en-US", {
-    timeZone: timezone,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  });
+        // If dateText is natural language, we expect the assistant to call parse_datetime_ny first,
+        // but we still support passing MM-DD-YYYY directly.
+        const dateMMDDYYYY = dateText; // keep simple for now
 
-  // helper to add days
-  const addDays = (d, n) => {
-    const x = new Date(d.getTime());
-    x.setDate(x.getDate() + n);
-    return x;
-  };
+        try {
+          // NOTE: If this endpoint returns 404/400, we will adjust based on the error in Render logs.
+          const resp = await axios.get(
+            `https://services.leadconnectorhq.com/calendars/${calendarId}/free-slots`,
+            {
+              headers: {
+                Authorization: `Bearer ${GHL_API_KEY}`,
+                Version: "2021-07-28",
+              },
+              params: {
+                locationId: GHL_LOCATION_ID,
+                date: dateMMDDYYYY,
+                timezone,
+                duration: durationMinutes,
+              },
+            }
+          );
 
-  const lower = text.toLowerCase();
+          results.push({
+            toolCallId,
+            result: {
+              success: true,
+              calendarId,
+              locationId: GHL_LOCATION_ID,
+              date: dateMMDDYYYY,
+              timezone,
+              durationMinutes,
+              data: resp.data,
+            },
+          });
+        } catch (error) {
+          const details = error.response?.data || error.message;
+          console.error("❌ ghl_availability_day error:", details);
 
-  // Determine target day
-  let target = now;
+          results.push({
+            toolCallId,
+            result: {
+              success: false,
+              error: "ghl_availability_day failed",
+              details,
+              calendarId,
+              locationId: GHL_LOCATION_ID,
+              date: dateMMDDYYYY,
+              timezone,
+              durationMinutes,
+            },
+          });
+        }
 
-  const daysMap = {
-    domingo: 0, sunday: 0,
-    lunes: 1, monday: 1,
-    martes: 2, tuesday: 2,
-    miercoles: 3, miércoles: 3, wednesday: 3,
-    jueves: 4, thursday: 4,
-    viernes: 5, friday: 5,
-    sabado: 6, sábado: 6, saturday: 6,
-  };
+        continue;
+      }
 
-  if (lower.includes("mañana") || lower.includes("tomorrow")) {
-    target = addDays(now, 1);
-  } else {
-    // find weekday mention
-    const found = Object.keys(daysMap).find(k => lower.includes(k));
-    if (found) {
-      const desired = daysMap[found];
-      const currentDow = new Date(new Intl.DateTimeFormat("en-US", { timeZone: timezone, weekday: "short" }).format(now) + " 01 2000").getDay();
-      let delta = (desired - currentDow + 7) % 7;
-      if (delta === 0) delta = 7; // next same weekday
-      target = addDays(now, delta);
-    }
-  }
-
-  // Determine hour/min
-  let hour = null;
-  let minute = 0;
-
-  // 18:30, 6:30
-  const hm = lower.match(/\b(\d{1,2})\s*[:h]\s*(\d{2})\b/);
-  if (hm) {
-    hour = parseInt(hm[1], 10);
-    minute = parseInt(hm[2], 10);
-  } else {
-    const h = lower.match(/\b(\d{1,2})\b/);
-    if (h) hour = parseInt(h[1], 10);
-  }
-
-  // am/pm inference
-  const hasPM =
-    lower.includes("pm") ||
-    lower.includes("tarde") ||
-    lower.includes("noche");
-  const hasAM =
-    lower.includes("am") ||
-    lower.includes("mañana ") || // morning context, not "tomorrow" only
-    lower.includes("morning");
-
-  if (hour !== null) {
-    if (hasPM && hour < 12) hour += 12;
-    if (hasAM && hour === 12) hour = 0;
-  }
-
-  // Build ISO-like in timezone by formatting components
-  const parts = fmtDate.formatToParts(target);
-  const mm = parts.find(p => p.type === "month")?.value;
-  const dd = parts.find(p => p.type === "day")?.value;
-  const yyyy = parts.find(p => p.type === "year")?.value;
-
-  const dateMMDDYYYY = `${mm}-${dd}-${yyyy}`;
-
-  results.push({
-    toolCallId,
-    result: {
-      success: true,
-      timezone,
-      originalText: text,
-      dateMMDDYYYY,
-      preferredTime: hour === null ? null : { hour, minute }
-    }
-  });
-  continue;
-}
-
+      /* ---------------------------
+         Unknown tool
+      --------------------------- */
       results.push({
         toolCallId,
-        result: { success: false, error: `Unknown tool: ${name}` }
+        result: { success: false, error: `Unknown tool: ${name}` },
       });
     }
 
@@ -205,9 +280,9 @@ app.post("/tool-calls", async (req, res) => {
       results: [
         {
           toolCallId: req.body?.message?.toolCallList?.[0]?.toolCallId,
-          result: { success: false, error: err.message }
-        }
-      ]
+          result: { success: false, error: err.message },
+        },
+      ],
     });
   }
 });
