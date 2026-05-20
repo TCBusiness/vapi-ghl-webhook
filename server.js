@@ -6,7 +6,6 @@ app.use(express.json());
 
 /* ===========================
    GLOBAL REQUEST LOGGER
-   (see every incoming request)
 =========================== */
 app.use((req, res, next) => {
   const start = Date.now();
@@ -20,7 +19,7 @@ app.use((req, res, next) => {
 
 const PORT = process.env.PORT || 3000;
 const GHL_API_KEY = process.env.GHL_API_KEY;
-const GHL_LOCATION_ID = process.env.GHL_LOCATION_ID;
+const GHL_LOCATION_ID = process.env.GHL_LOCATION_ID; // still used for SMS/contact search
 
 /* ===========================
    HEALTH CHECK
@@ -67,6 +66,40 @@ app.post("/vapi-webhook", async (req, res) => {
     console.error("❌ Webhook error:", err.message);
   }
 });
+
+/* ===========================
+   HELPERS
+=========================== */
+
+// Parse "MM-DD-YYYY" into numbers
+function parseMMDDYYYY(dateStr) {
+  const parts = (dateStr || "").split("-");
+  if (parts.length !== 3) return null;
+  const mm = parseInt(parts[0], 10);
+  const dd = parseInt(parts[1], 10);
+  const yyyy = parseInt(parts[2], 10);
+  if (!mm || !dd || !yyyy) return null;
+  return { mm, dd, yyyy };
+}
+
+// Build startDate/endDate epoch ms for 9am–6pm in America/New_York
+// NOTE: This uses JS Date parsing which is server-local-time dependent.
+// For production-perfect timezone handling, we'd use luxon, but this will work for most setups.
+function buildBusinessWindowEpochMs(dateMMDDYYYY) {
+  const parsed = parseMMDDYYYY(dateMMDDYYYY);
+  if (!parsed) return null;
+
+  const { mm, dd, yyyy } = parsed;
+
+  // Construct a local datetime string. Many Node runtimes interpret this as local server time.
+  // If your Render server is UTC (common), 9am NY will not equal 9am UTC.
+  // If you see shifted times, we should switch to Luxon for strict NY conversion.
+  const isoDate = `${yyyy}-${String(mm).padStart(2, "0")}-${String(dd).padStart(2, "0")}`;
+  const startLocal = new Date(`${isoDate}T09:00:00`);
+  const endLocal = new Date(`${isoDate}T18:00:00`);
+
+  return { startDate: startLocal.getTime(), endDate: endLocal.getTime() };
+}
 
 /* ===========================
    VAPI TOOL CALLS (LIVE)
@@ -116,22 +149,13 @@ app.post("/tool-calls", async (req, res) => {
         let target = now;
 
         const daysMap = {
-          domingo: 0,
-          sunday: 0,
-          lunes: 1,
-          monday: 1,
-          martes: 2,
-          tuesday: 2,
-          miercoles: 3,
-          miércoles: 3,
-          wednesday: 3,
-          jueves: 4,
-          thursday: 4,
-          viernes: 5,
-          friday: 5,
-          sabado: 6,
-          sábado: 6,
-          saturday: 6,
+          domingo: 0, sunday: 0,
+          lunes: 1, monday: 1,
+          martes: 2, tuesday: 2,
+          miercoles: 3, miércoles: 3, wednesday: 3,
+          jueves: 4, thursday: 4,
+          viernes: 5, friday: 5,
+          sabado: 6, sábado: 6, saturday: 6,
         };
 
         if (lower.includes("mañana") || lower.includes("tomorrow")) {
@@ -141,27 +165,16 @@ app.post("/tool-calls", async (req, res) => {
           if (found) {
             const desired = daysMap[found];
 
-            // get current weekday in target timezone
             const currentWeekdayShort = new Intl.DateTimeFormat("en-US", {
               timeZone: timezone,
               weekday: "short",
             }).format(now);
 
-            // Map short weekday to number (Sun=0..Sat=6)
-            const shortMap = {
-              Sun: 0,
-              Mon: 1,
-              Tue: 2,
-              Wed: 3,
-              Thu: 4,
-              Fri: 5,
-              Sat: 6,
-            };
-            const currentDow =
-              shortMap[currentWeekdayShort] ?? new Date().getDay();
+            const shortMap = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
+            const currentDow = shortMap[currentWeekdayShort] ?? new Date().getDay();
 
             let delta = (desired - currentDow + 7) % 7;
-            if (delta === 0) delta = 7; // "next Monday" behavior
+            if (delta === 0) delta = 7;
             target = addDays(now, delta);
           }
         }
@@ -170,7 +183,7 @@ app.post("/tool-calls", async (req, res) => {
         let hour = null;
         let minute = 0;
 
-        const hm = lower.match(/\b(\d{1,2})\s*[:h]\s*(\d{2})\b/); // 18:30, 6:30, 18h30
+        const hm = lower.match(/\b(\d{1,2})\s*[:h]\s*(\d{2})\b/);
         if (hm) {
           hour = parseInt(hm[1], 10);
           minute = parseInt(hm[2], 10);
@@ -233,16 +246,28 @@ app.post("/tool-calls", async (req, res) => {
             toolCallId,
             result: {
               success: false,
-              error:
-                "Missing required params: calendarId, dateText, durationMinutes",
+              error: "Missing required params: calendarId, dateText, durationMinutes",
               receivedArgs: args,
             },
           });
           continue;
         }
 
-        // Assistant should pass MM-DD-YYYY here (from parse tool), but we accept raw.
+        // Expect MM-DD-YYYY
         const dateMMDDYYYY = dateText;
+
+        const window = buildBusinessWindowEpochMs(dateMMDDYYYY);
+        if (!window || !window.startDate || !window.endDate) {
+          results.push({
+            toolCallId,
+            result: {
+              success: false,
+              error: "Invalid dateText. Expected MM-DD-YYYY like 05-21-2026",
+              receivedDateText: dateText,
+            },
+          });
+          continue;
+        }
 
         try {
           const resp = await axios.get(
@@ -253,10 +278,9 @@ app.post("/tool-calls", async (req, res) => {
                 Version: "2021-07-28",
               },
               params: {
-                locationId: GHL_LOCATION_ID,
-                date: dateMMDDYYYY,
+                startDate: window.startDate,
+                endDate: window.endDate,
                 timezone,
-                duration: durationMinutes,
               },
             }
           );
@@ -266,10 +290,11 @@ app.post("/tool-calls", async (req, res) => {
             result: {
               success: true,
               calendarId,
-              locationId: GHL_LOCATION_ID,
               date: dateMMDDYYYY,
               timezone,
-              durationMinutes,
+              businessHours: "09:00-18:00",
+              startDate: window.startDate,
+              endDate: window.endDate,
               data: resp.data,
             },
           });
@@ -284,10 +309,11 @@ app.post("/tool-calls", async (req, res) => {
               error: "ghl_availability_day failed",
               details,
               calendarId,
-              locationId: GHL_LOCATION_ID,
               date: dateMMDDYYYY,
               timezone,
-              durationMinutes,
+              businessHours: "09:00-18:00",
+              startDate: window.startDate,
+              endDate: window.endDate,
             },
           });
         }
