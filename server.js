@@ -90,17 +90,107 @@ app.post("/tool-calls", async (req, res) => {
         continue;
       }
 
-      if (name === "ghl_availability_day") {
-        results.push({
-          toolCallId,
-          result: {
-            success: false,
-            error: "ghl_availability_day not implemented yet",
-            receivedArgs: args
-          }
-        });
-        continue;
-      }
+      if (name === "parse_datetime_ny") {
+  const text = (args.text || "").toString();
+  const timezone = (args.timezone || "America/New_York").toString();
+
+  // Very simple parser: handles "mañana" / "tomorrow" and "lunes" / "monday"
+  // and common times like "6", "6pm", "6 pm", "18:00", "6 de la tarde".
+  // (We can expand after first test.)
+
+  const now = new Date();
+  const fmtDate = new Intl.DateTimeFormat("en-US", {
+    timeZone: timezone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  });
+
+  // helper to add days
+  const addDays = (d, n) => {
+    const x = new Date(d.getTime());
+    x.setDate(x.getDate() + n);
+    return x;
+  };
+
+  const lower = text.toLowerCase();
+
+  // Determine target day
+  let target = now;
+
+  const daysMap = {
+    domingo: 0, sunday: 0,
+    lunes: 1, monday: 1,
+    martes: 2, tuesday: 2,
+    miercoles: 3, miércoles: 3, wednesday: 3,
+    jueves: 4, thursday: 4,
+    viernes: 5, friday: 5,
+    sabado: 6, sábado: 6, saturday: 6,
+  };
+
+  if (lower.includes("mañana") || lower.includes("tomorrow")) {
+    target = addDays(now, 1);
+  } else {
+    // find weekday mention
+    const found = Object.keys(daysMap).find(k => lower.includes(k));
+    if (found) {
+      const desired = daysMap[found];
+      const currentDow = new Date(new Intl.DateTimeFormat("en-US", { timeZone: timezone, weekday: "short" }).format(now) + " 01 2000").getDay();
+      let delta = (desired - currentDow + 7) % 7;
+      if (delta === 0) delta = 7; // next same weekday
+      target = addDays(now, delta);
+    }
+  }
+
+  // Determine hour/min
+  let hour = null;
+  let minute = 0;
+
+  // 18:30, 6:30
+  const hm = lower.match(/\b(\d{1,2})\s*[:h]\s*(\d{2})\b/);
+  if (hm) {
+    hour = parseInt(hm[1], 10);
+    minute = parseInt(hm[2], 10);
+  } else {
+    const h = lower.match(/\b(\d{1,2})\b/);
+    if (h) hour = parseInt(h[1], 10);
+  }
+
+  // am/pm inference
+  const hasPM =
+    lower.includes("pm") ||
+    lower.includes("tarde") ||
+    lower.includes("noche");
+  const hasAM =
+    lower.includes("am") ||
+    lower.includes("mañana ") || // morning context, not "tomorrow" only
+    lower.includes("morning");
+
+  if (hour !== null) {
+    if (hasPM && hour < 12) hour += 12;
+    if (hasAM && hour === 12) hour = 0;
+  }
+
+  // Build ISO-like in timezone by formatting components
+  const parts = fmtDate.formatToParts(target);
+  const mm = parts.find(p => p.type === "month")?.value;
+  const dd = parts.find(p => p.type === "day")?.value;
+  const yyyy = parts.find(p => p.type === "year")?.value;
+
+  const dateMMDDYYYY = `${mm}-${dd}-${yyyy}`;
+
+  results.push({
+    toolCallId,
+    result: {
+      success: true,
+      timezone,
+      originalText: text,
+      dateMMDDYYYY,
+      preferredTime: hour === null ? null : { hour, minute }
+    }
+  });
+  continue;
+}
 
       results.push({
         toolCallId,
