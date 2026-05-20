@@ -4,6 +4,20 @@ const axios = require("axios");
 const app = express();
 app.use(express.json());
 
+/* ===========================
+   GLOBAL REQUEST LOGGER
+   (see every incoming request)
+=========================== */
+app.use((req, res, next) => {
+  const start = Date.now();
+  res.on("finish", () => {
+    console.log(
+      `🌐 ${req.method} ${req.path} -> ${res.statusCode} (${Date.now() - start}ms)`
+    );
+  });
+  next();
+});
+
 const PORT = process.env.PORT || 3000;
 const GHL_API_KEY = process.env.GHL_API_KEY;
 const GHL_LOCATION_ID = process.env.GHL_LOCATION_ID;
@@ -20,7 +34,6 @@ app.get("/health", (req, res) => {
 =========================== */
 app.post("/vapi-webhook", async (req, res) => {
   console.log("✅ Webhook received");
-
   res.status(200).json({ received: true });
 
   try {
@@ -40,9 +53,7 @@ app.post("/vapi-webhook", async (req, res) => {
       return;
     }
 
-    const success =
-      body.message?.analysis?.successEvaluation === "true";
-
+    const success = body.message?.analysis?.successEvaluation === "true";
     console.log("✅ successEvaluation:", success);
 
     if (success) {
@@ -52,17 +63,22 @@ app.post("/vapi-webhook", async (req, res) => {
 
     console.log("⚠️ Sending follow-up SMS...");
     await sendFollowUpSMS(phone);
-
   } catch (err) {
     console.error("❌ Webhook error:", err.message);
   }
 });
+
 /* ===========================
    VAPI TOOL CALLS (LIVE)
 =========================== */
 app.post("/tool-calls", async (req, res) => {
   try {
     const body = req.body;
+
+    console.log(
+      "📩 /tool-calls payload:",
+      JSON.stringify(body?.message?.toolCallList || [], null, 2)
+    );
 
     const toolCalls = body?.message?.toolCallList || [];
     if (!toolCalls.length) {
@@ -100,19 +116,28 @@ app.post("/tool-calls", async (req, res) => {
         let target = now;
 
         const daysMap = {
-          domingo: 0, sunday: 0,
-          lunes: 1, monday: 1,
-          martes: 2, tuesday: 2,
-          miercoles: 3, miércoles: 3, wednesday: 3,
-          jueves: 4, thursday: 4,
-          viernes: 5, friday: 5,
-          sabado: 6, sábado: 6, saturday: 6,
+          domingo: 0,
+          sunday: 0,
+          lunes: 1,
+          monday: 1,
+          martes: 2,
+          tuesday: 2,
+          miercoles: 3,
+          miércoles: 3,
+          wednesday: 3,
+          jueves: 4,
+          thursday: 4,
+          viernes: 5,
+          friday: 5,
+          sabado: 6,
+          sábado: 6,
+          saturday: 6,
         };
 
         if (lower.includes("mañana") || lower.includes("tomorrow")) {
           target = addDays(now, 1);
         } else {
-          const found = Object.keys(daysMap).find(k => lower.includes(k));
+          const found = Object.keys(daysMap).find((k) => lower.includes(k));
           if (found) {
             const desired = daysMap[found];
 
@@ -123,8 +148,17 @@ app.post("/tool-calls", async (req, res) => {
             }).format(now);
 
             // Map short weekday to number (Sun=0..Sat=6)
-            const shortMap = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
-            const currentDow = shortMap[currentWeekdayShort] ?? new Date().getDay();
+            const shortMap = {
+              Sun: 0,
+              Mon: 1,
+              Tue: 2,
+              Wed: 3,
+              Thu: 4,
+              Fri: 5,
+              Sat: 6,
+            };
+            const currentDow =
+              shortMap[currentWeekdayShort] ?? new Date().getDay();
 
             let delta = (desired - currentDow + 7) % 7;
             if (delta === 0) delta = 7; // "next Monday" behavior
@@ -151,9 +185,7 @@ app.post("/tool-calls", async (req, res) => {
           lower.includes("noche") ||
           lower.includes("evening");
 
-        const hasAM =
-          lower.includes("am") ||
-          lower.includes("morning");
+        const hasAM = lower.includes("am") || lower.includes("morning");
 
         if (hour !== null) {
           if (hasPM && hour < 12) hour += 12;
@@ -168,9 +200,9 @@ app.post("/tool-calls", async (req, res) => {
           day: "2-digit",
         }).formatToParts(target);
 
-        const mm = parts.find(p => p.type === "month")?.value;
-        const dd = parts.find(p => p.type === "day")?.value;
-        const yyyy = parts.find(p => p.type === "year")?.value;
+        const mm = parts.find((p) => p.type === "month")?.value;
+        const dd = parts.find((p) => p.type === "day")?.value;
+        const yyyy = parts.find((p) => p.type === "year")?.value;
 
         const dateMMDDYYYY = `${mm}-${dd}-${yyyy}`;
 
@@ -201,19 +233,18 @@ app.post("/tool-calls", async (req, res) => {
             toolCallId,
             result: {
               success: false,
-              error: "Missing required params: calendarId, dateText, durationMinutes",
+              error:
+                "Missing required params: calendarId, dateText, durationMinutes",
               receivedArgs: args,
             },
           });
           continue;
         }
 
-        // If dateText is natural language, we expect the assistant to call parse_datetime_ny first,
-        // but we still support passing MM-DD-YYYY directly.
-        const dateMMDDYYYY = dateText; // keep simple for now
+        // Assistant should pass MM-DD-YYYY here (from parse tool), but we accept raw.
+        const dateMMDDYYYY = dateText;
 
         try {
-          // NOTE: If this endpoint returns 404/400, we will adjust based on the error in Render logs.
           const resp = await axios.get(
             `https://services.leadconnectorhq.com/calendars/${calendarId}/free-slots`,
             {
@@ -333,12 +364,8 @@ async function sendFollowUpSMS(phone) {
     );
 
     console.log("✅ SMS sent successfully");
-
   } catch (error) {
-    console.error(
-      "❌ GHL error:",
-      error.response?.data || error.message
-    );
+    console.error("❌ GHL error:", error.response?.data || error.message);
   }
 }
 
