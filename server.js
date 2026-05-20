@@ -2,7 +2,7 @@ const express = require("express");
 const axios = require("axios");
 
 const app = express();
-app.use(express.json());
+app.use(express.json({ limit: "2mb" }));
 
 /* ===========================
    GLOBAL REQUEST LOGGER
@@ -19,7 +19,7 @@ app.use((req, res, next) => {
 
 const PORT = process.env.PORT || 3000;
 const GHL_API_KEY = process.env.GHL_API_KEY;
-const GHL_LOCATION_ID = process.env.GHL_LOCATION_ID; // still used for SMS/contact search
+const GHL_LOCATION_ID = process.env.GHL_LOCATION_ID; // used for SMS/contact search
 
 /* ===========================
    HEALTH CHECK
@@ -29,7 +29,7 @@ app.get("/health", (req, res) => {
 });
 
 /* ===========================
-   VAPI WEBHOOK
+   VAPI WEBHOOK (END-OF-CALL)
 =========================== */
 app.post("/vapi-webhook", async (req, res) => {
   console.log("✅ Webhook received");
@@ -71,7 +71,6 @@ app.post("/vapi-webhook", async (req, res) => {
    HELPERS
 =========================== */
 
-// Parse "MM-DD-YYYY" into numbers
 function parseMMDDYYYY(dateStr) {
   const parts = (dateStr || "").split("-");
   if (parts.length !== 3) return null;
@@ -82,23 +81,36 @@ function parseMMDDYYYY(dateStr) {
   return { mm, dd, yyyy };
 }
 
-// Build startDate/endDate epoch ms for 9am–6pm in America/New_York
-// NOTE: This uses JS Date parsing which is server-local-time dependent.
-// For production-perfect timezone handling, we'd use luxon, but this will work for most setups.
+// Business window 9am–6pm. (If you see timezone drift, we can switch to Luxon.)
 function buildBusinessWindowEpochMs(dateMMDDYYYY) {
   const parsed = parseMMDDYYYY(dateMMDDYYYY);
   if (!parsed) return null;
 
   const { mm, dd, yyyy } = parsed;
 
-  // Construct a local datetime string. Many Node runtimes interpret this as local server time.
-  // If your Render server is UTC (common), 9am NY will not equal 9am UTC.
-  // If you see shifted times, we should switch to Luxon for strict NY conversion.
-  const isoDate = `${yyyy}-${String(mm).padStart(2, "0")}-${String(dd).padStart(2, "0")}`;
+  const isoDate = `${yyyy}-${String(mm).padStart(2, "0")}-${String(dd).padStart(
+    2,
+    "0"
+  )}`;
   const startLocal = new Date(`${isoDate}T09:00:00`);
   const endLocal = new Date(`${isoDate}T18:00:00`);
 
   return { startDate: startLocal.getTime(), endDate: endLocal.getTime() };
+}
+
+function normalizeArgs(maybeArgs) {
+  // Vapi can send arguments as an object OR as a JSON string.
+  if (maybeArgs == null) return {};
+  if (typeof maybeArgs === "object") return maybeArgs;
+  if (typeof maybeArgs === "string") {
+    try {
+      const parsed = JSON.parse(maybeArgs);
+      return typeof parsed === "object" && parsed != null ? parsed : {};
+    } catch (e) {
+      return {};
+    }
+  }
+  return {};
 }
 
 /* ===========================
@@ -123,7 +135,9 @@ app.post("/tool-calls", async (req, res) => {
     for (const tc of toolCalls) {
       const toolCallId = tc.toolCallId;
       const name = tc.function?.name;
-      const args = tc.function?.arguments || {};
+
+      // ✅ FIX: normalize arguments
+      const args = normalizeArgs(tc.function?.arguments);
 
       if (!toolCallId || !name) continue;
 
@@ -135,6 +149,20 @@ app.post("/tool-calls", async (req, res) => {
       if (name === "parse_datetime_ny") {
         const text = (args.text || "").toString();
         const timezone = (args.timezone || "America/New_York").toString();
+
+        // Guard: if args parsing failed, do not silently break
+        if (!text) {
+          results.push({
+            toolCallId,
+            result: {
+              success: false,
+              error: "Missing 'text' argument for parse_datetime_ny",
+              receivedArgs: args,
+              receivedRawArguments: tc.function?.arguments,
+            },
+          });
+          continue;
+        }
 
         const addDays = (d, n) => {
           const x = new Date(d.getTime());
@@ -149,13 +177,22 @@ app.post("/tool-calls", async (req, res) => {
         let target = now;
 
         const daysMap = {
-          domingo: 0, sunday: 0,
-          lunes: 1, monday: 1,
-          martes: 2, tuesday: 2,
-          miercoles: 3, miércoles: 3, wednesday: 3,
-          jueves: 4, thursday: 4,
-          viernes: 5, friday: 5,
-          sabado: 6, sábado: 6, saturday: 6,
+          domingo: 0,
+          sunday: 0,
+          lunes: 1,
+          monday: 1,
+          martes: 2,
+          tuesday: 2,
+          miercoles: 3,
+          miércoles: 3,
+          wednesday: 3,
+          jueves: 4,
+          thursday: 4,
+          viernes: 5,
+          friday: 5,
+          sabado: 6,
+          sábado: 6,
+          saturday: 6,
         };
 
         if (lower.includes("mañana") || lower.includes("tomorrow")) {
@@ -170,8 +207,17 @@ app.post("/tool-calls", async (req, res) => {
               weekday: "short",
             }).format(now);
 
-            const shortMap = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
-            const currentDow = shortMap[currentWeekdayShort] ?? new Date().getDay();
+            const shortMap = {
+              Sun: 0,
+              Mon: 1,
+              Tue: 2,
+              Wed: 3,
+              Thu: 4,
+              Fri: 5,
+              Sat: 6,
+            };
+            const currentDow =
+              shortMap[currentWeekdayShort] ?? new Date().getDay();
 
             let delta = (desired - currentDow + 7) % 7;
             if (delta === 0) delta = 7;
@@ -197,7 +243,6 @@ app.post("/tool-calls", async (req, res) => {
           lower.includes("tarde") ||
           lower.includes("noche") ||
           lower.includes("evening");
-
         const hasAM = lower.includes("am") || lower.includes("morning");
 
         if (hour !== null) {
@@ -205,7 +250,6 @@ app.post("/tool-calls", async (req, res) => {
           if (hasAM && hour === 12) hour = 0;
         }
 
-        // Format date in timezone as MM-DD-YYYY
         const parts = new Intl.DateTimeFormat("en-US", {
           timeZone: timezone,
           year: "numeric",
@@ -246,14 +290,15 @@ app.post("/tool-calls", async (req, res) => {
             toolCallId,
             result: {
               success: false,
-              error: "Missing required params: calendarId, dateText, durationMinutes",
+              error:
+                "Missing required params: calendarId, dateText, durationMinutes",
               receivedArgs: args,
+              receivedRawArguments: tc.function?.arguments,
             },
           });
           continue;
         }
 
-        // Expect MM-DD-YYYY
         const dateMMDDYYYY = dateText;
 
         const window = buildBusinessWindowEpochMs(dateMMDDYYYY);
