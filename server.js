@@ -81,7 +81,7 @@ function parseMMDDYYYY(dateStr) {
   return { mm, dd, yyyy };
 }
 
-// Business window 9am–6pm. (If you see timezone drift, we can switch to Luxon.)
+// Business window 9am–6pm (returns epoch ms)
 function buildBusinessWindowEpochMs(dateMMDDYYYY) {
   const parsed = parseMMDDYYYY(dateMMDDYYYY);
   if (!parsed) return null;
@@ -95,7 +95,7 @@ function buildBusinessWindowEpochMs(dateMMDDYYYY) {
   const startLocal = new Date(`${isoDate}T09:00:00`);
   const endLocal = new Date(`${isoDate}T18:00:00`);
 
-  return { startDate: startLocal.getTime(), endDate: endLocal.getTime() };
+  return { startDateMs: startLocal.getTime(), endDateMs: endLocal.getTime() };
 }
 
 function normalizeArgs(maybeArgs) {
@@ -136,7 +136,7 @@ app.post("/tool-calls", async (req, res) => {
       const toolCallId = tc.toolCallId;
       const name = tc.function?.name;
 
-      // ✅ FIX: normalize arguments
+      // ✅ normalize arguments
       const args = normalizeArgs(tc.function?.arguments);
 
       if (!toolCallId || !name) continue;
@@ -150,7 +150,6 @@ app.post("/tool-calls", async (req, res) => {
         const text = (args.text || "").toString();
         const timezone = (args.timezone || "America/New_York").toString();
 
-        // Guard: if args parsing failed, do not silently break
         if (!text) {
           results.push({
             toolCallId,
@@ -173,7 +172,6 @@ app.post("/tool-calls", async (req, res) => {
         const lower = text.toLowerCase();
         const now = new Date();
 
-        // Determine target day
         let target = now;
 
         const daysMap = {
@@ -225,7 +223,7 @@ app.post("/tool-calls", async (req, res) => {
           }
         }
 
-        // Determine hour/minute
+        // hour/minute
         let hour = null;
         let minute = 0;
 
@@ -302,7 +300,7 @@ app.post("/tool-calls", async (req, res) => {
         const dateMMDDYYYY = dateText;
 
         const window = buildBusinessWindowEpochMs(dateMMDDYYYY);
-        if (!window || !window.startDate || !window.endDate) {
+        if (!window || !window.startDateMs || !window.endDateMs) {
           results.push({
             toolCallId,
             result: {
@@ -314,6 +312,10 @@ app.post("/tool-calls", async (req, res) => {
           continue;
         }
 
+        // ✅ GHL expects seconds (not ms) for startDate/endDate on this endpoint
+        const startDateSeconds = Math.floor(window.startDateMs / 1000);
+        const endDateSeconds = Math.floor(window.endDateMs / 1000);
+
         try {
           const resp = await axios.get(
             `https://services.leadconnectorhq.com/calendars/${calendarId}/free-slots`,
@@ -323,8 +325,8 @@ app.post("/tool-calls", async (req, res) => {
                 Version: "2021-07-28",
               },
               params: {
-                startDate: window.startDate,
-                endDate: window.endDate,
+                startDate: startDateSeconds,
+                endDate: endDateSeconds,
                 timezone,
               },
             }
@@ -338,8 +340,8 @@ app.post("/tool-calls", async (req, res) => {
               date: dateMMDDYYYY,
               timezone,
               businessHours: "09:00-18:00",
-              startDate: window.startDate,
-              endDate: window.endDate,
+              startDateSeconds,
+              endDateSeconds,
               data: resp.data,
             },
           });
@@ -357,8 +359,8 @@ app.post("/tool-calls", async (req, res) => {
               date: dateMMDDYYYY,
               timezone,
               businessHours: "09:00-18:00",
-              startDate: window.startDate,
-              endDate: window.endDate,
+              startDateSeconds,
+              endDateSeconds,
             },
           });
         }
