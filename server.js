@@ -76,33 +76,6 @@ app.post("/vapi-webhook", async (req, res) => {
    HELPERS
 =========================== */
 
-function parseMMDDYYYY(dateStr) {
-  const parts = (dateStr || "").split("-");
-  if (parts.length !== 3) return null;
-  const mm = parseInt(parts[0], 10);
-  const dd = parseInt(parts[1], 10);
-  const yyyy = parseInt(parts[2], 10);
-  if (!mm || !dd || !yyyy) return null;
-  return { mm, dd, yyyy };
-}
-
-// Business window 9am–6pm (returns epoch ms)
-function buildBusinessWindowEpochMs(dateMMDDYYYY) {
-  const parsed = parseMMDDYYYY(dateMMDDYYYY);
-  if (!parsed) return null;
-
-  const { mm, dd, yyyy } = parsed;
-
-  const isoDate = `${yyyy}-${String(mm).padStart(2, "0")}-${String(dd).padStart(
-    2,
-    "0"
-  )}`;
-  const startLocal = new Date(`${isoDate}T09:00:00`);
-  const endLocal = new Date(`${isoDate}T18:00:00`);
-
-  return { startDateMs: startLocal.getTime(), endDateMs: endLocal.getTime() };
-}
-
 function normalizeArgs(maybeArgs) {
   // Vapi can send arguments as an object OR as a JSON string.
   if (maybeArgs == null) return {};
@@ -146,11 +119,8 @@ app.post("/tool-calls", async (req, res) => {
     const results = [];
 
     for (const tc of toolCalls) {
-      // Vapi uses tc.id (OpenAI-style). Keep tc.toolCallId as fallback.
-      const toolCallId = tc.id || tc.toolCallId;
+      const toolCallId = tc.id || tc.toolCallId; // Vapi uses tc.id (OpenAI-style)
       const name = tc.function?.name;
-
-      // normalize arguments
       const args = normalizeArgs(tc.function?.arguments);
 
       if (!toolCallId || !name) {
@@ -175,231 +145,7 @@ app.post("/tool-calls", async (req, res) => {
       );
 
       /* ---------------------------
-         1) parse_datetime_ny
-      --------------------------- */
-      if (name === "parse_datetime_ny") {
-        const text = (args.text || "").toString();
-        const timezone = (args.timezone || "America/New_York").toString();
-
-        if (!text) {
-          results.push({
-            toolCallId,
-            result: {
-              success: false,
-              error: "Missing 'text' argument for parse_datetime_ny",
-              receivedArgs: args,
-              receivedRawArguments: tc.function?.arguments,
-            },
-          });
-          continue;
-        }
-
-        const addDays = (d, n) => {
-          const x = new Date(d.getTime());
-          x.setDate(x.getDate() + n);
-          return x;
-        };
-
-        const lower = text.toLowerCase();
-        const now = new Date();
-
-        let target = now;
-
-        const daysMap = {
-          domingo: 0,
-          sunday: 0,
-          lunes: 1,
-          monday: 1,
-          martes: 2,
-          tuesday: 2,
-          miercoles: 3,
-          miércoles: 3,
-          wednesday: 3,
-          jueves: 4,
-          thursday: 4,
-          viernes: 5,
-          friday: 5,
-          sabado: 6,
-          sábado: 6,
-          saturday: 6,
-        };
-
-        if (lower.includes("mañana") || lower.includes("tomorrow")) {
-          target = addDays(now, 1);
-        } else {
-          const found = Object.keys(daysMap).find((k) => lower.includes(k));
-          if (found) {
-            const desired = daysMap[found];
-
-            const currentWeekdayShort = new Intl.DateTimeFormat("en-US", {
-              timeZone: timezone,
-              weekday: "short",
-            }).format(now);
-
-            const shortMap = {
-              Sun: 0,
-              Mon: 1,
-              Tue: 2,
-              Wed: 3,
-              Thu: 4,
-              Fri: 5,
-              Sat: 6,
-            };
-            const currentDow =
-              shortMap[currentWeekdayShort] ?? new Date().getDay();
-
-            let delta = (desired - currentDow + 7) % 7;
-            if (delta === 0) delta = 7;
-            target = addDays(now, delta);
-          }
-        }
-
-        // hour/minute
-        let hour = null;
-        let minute = 0;
-
-        const hm = lower.match(/\b(\d{1,2})\s*[:h]\s*(\d{2})\b/);
-        if (hm) {
-          hour = parseInt(hm[1], 10);
-          minute = parseInt(hm[2], 10);
-        } else {
-          const h = lower.match(/\b(\d{1,2})\b/);
-          if (h) hour = parseInt(h[1], 10);
-        }
-
-        const hasPM =
-          lower.includes("pm") ||
-          lower.includes("tarde") ||
-          lower.includes("noche") ||
-          lower.includes("evening");
-        const hasAM = lower.includes("am") || lower.includes("morning");
-
-        if (hour !== null) {
-          if (hasPM && hour < 12) hour += 12;
-          if (hasAM && hour === 12) hour = 0;
-        }
-
-        const parts = new Intl.DateTimeFormat("en-US", {
-          timeZone: timezone,
-          year: "numeric",
-          month: "2-digit",
-          day: "2-digit",
-        }).formatToParts(target);
-
-        const mm = parts.find((p) => p.type === "month")?.value;
-        const dd = parts.find((p) => p.type === "day")?.value;
-        const yyyy = parts.find((p) => p.type === "year")?.value;
-
-        const dateMMDDYYYY = `${mm}-${dd}-${yyyy}`;
-
-        results.push({
-          toolCallId,
-          result: {
-            success: true,
-            timezone,
-            originalText: text,
-            dateMMDDYYYY,
-            preferredTime: hour === null ? null : { hour, minute },
-          },
-        });
-        continue;
-      }
-
-      /* ---------------------------
-         2) ghl_availability_day
-      --------------------------- */
-      if (name === "ghl_availability_day") {
-        const calendarId = (args.calendarId || "").toString();
-        const dateText = (args.dateText || "").toString(); // expecting MM-DD-YYYY
-        const timezone = (args.timezone || "America/New_York").toString();
-        const durationMinutes = Number(args.durationMinutes || 60);
-
-        if (!calendarId || !dateText || !durationMinutes) {
-          results.push({
-            toolCallId,
-            result: {
-              success: false,
-              error:
-                "Missing required params: calendarId, dateText, durationMinutes",
-              receivedArgs: args,
-              receivedRawArguments: tc.function?.arguments,
-            },
-          });
-          continue;
-        }
-
-        const window = buildBusinessWindowEpochMs(dateText);
-        if (!window || !window.startDateMs || !window.endDateMs) {
-          results.push({
-            toolCallId,
-            result: {
-              success: false,
-              error: "Invalid dateText. Expected MM-DD-YYYY like 05-21-2026",
-              receivedDateText: dateText,
-            },
-          });
-          continue;
-        }
-
-        // GHL expects seconds (not ms) for startDate/endDate on this endpoint
-        const startDateSeconds = Math.floor(window.startDateMs / 1000);
-        const endDateSeconds = Math.floor(window.endDateMs / 1000);
-
-        try {
-          const resp = await axios.get(
-            `https://services.leadconnectorhq.com/calendars/${calendarId}/free-slots`,
-            {
-              headers: {
-                Authorization: `Bearer ${GHL_API_KEY}`,
-                Version: "2023-02-21",
-              },
-              params: {
-                startDate: startDateSeconds,
-                endDate: endDateSeconds,
-                timezone,
-              },
-            }
-          );
-
-          results.push({
-            toolCallId,
-            result: {
-              success: true,
-              calendarId,
-              date: dateText,
-              timezone,
-              businessHours: "09:00-18:00",
-              startDateSeconds,
-              endDateSeconds,
-              data: resp.data,
-            },
-          });
-        } catch (error) {
-          const details = error.response?.data || error.message;
-          console.error("❌ ghl_availability_day error:", details);
-
-          results.push({
-            toolCallId,
-            result: {
-              success: false,
-              error: "ghl_availability_day failed",
-              details,
-              calendarId,
-              date: dateText,
-              timezone,
-              businessHours: "09:00-18:00",
-              startDateSeconds,
-              endDateSeconds,
-            },
-          });
-        }
-
-        continue;
-      }
-
-      /* ---------------------------
-         3) ghl_find_or_create_contact_webhook
-         ✅ Uses /contacts/search/duplicate (working endpoint)
+         ghl_find_or_create_contact_webhook
       --------------------------- */
       if (name === "ghl_find_or_create_contact_webhook") {
         const phoneRaw = (args.phone || "").toString();
@@ -426,6 +172,8 @@ app.post("/tool-calls", async (req, res) => {
           fn = parts[0] || "";
           ln = parts.slice(1).join(" ");
         }
+
+        const logPrefix = `[ghl_find_or_create_contact_webhook] toolCallId=${toolCallId}`;
 
         try {
           // 1) SEARCH (GET /contacts/search/duplicate)
@@ -495,13 +243,349 @@ app.post("/tool-calls", async (req, res) => {
             },
           });
         } catch (error) {
+          const details = error.response?.data || error.message;
+          console.error(`${logPrefix} Error`, details);
+
           results.push({
             toolCallId,
             result: {
               success: false,
               error: "ghl_find_or_create_contact_webhook failed",
-              details: error.response?.data || error.message,
+              details,
               phone: phoneE164,
+            },
+          });
+        }
+
+        continue;
+      }
+
+      /* ---------------------------
+         ghl_check_cleaning_availability_webhook (FINAL v2)
+      --------------------------- */
+      if (name === "ghl_check_cleaning_availability_webhook") {
+        const calendarId = "y53J9Fbsd5Xz0bwUiE4K";
+        const timezone = (args.timezone || "America/New_York").toString();
+
+        const date = (args.date || "").toString().trim(); // YYYY-MM-DD
+        const durationMinutes = 60;
+
+        const preferredTime =
+          args.preferredTime && typeof args.preferredTime === "object"
+            ? args.preferredTime
+            : null;
+
+        const logPrefix = `[ghl_check_cleaning_availability_webhook] toolCallId=${toolCallId}`;
+
+        const epochSecondsInTimeZone = (ymd, hh, mm, tz) => {
+          const utcGuessMs = Date.UTC(
+            Number(ymd.slice(0, 4)),
+            Number(ymd.slice(5, 7)) - 1,
+            Number(ymd.slice(8, 10)),
+            hh,
+            mm,
+            0
+          );
+
+          const parts = new Intl.DateTimeFormat("en-US", {
+            timeZone: tz,
+            hour12: false,
+            year: "numeric",
+            month: "2-digit",
+            day: "2-digit",
+            hour: "2-digit",
+            minute: "2-digit",
+            second: "2-digit",
+          }).formatToParts(new Date(utcGuessMs));
+
+          const gotY = Number(parts.find((p) => p.type === "year")?.value);
+          const gotM = Number(parts.find((p) => p.type === "month")?.value);
+          const gotD = Number(parts.find((p) => p.type === "day")?.value);
+          const gotH = Number(parts.find((p) => p.type === "hour")?.value);
+          const gotMin = Number(parts.find((p) => p.type === "minute")?.value);
+
+          const wantY = Number(ymd.slice(0, 4));
+          const wantM = Number(ymd.slice(5, 7));
+          const wantD = Number(ymd.slice(8, 10));
+
+          if (
+            [gotY, gotM, gotD, gotH, gotMin, wantY, wantM, wantD].some((x) =>
+              Number.isNaN(x)
+            )
+          ) {
+            return Math.floor(utcGuessMs / 1000);
+          }
+
+          const gotTotal =
+            (((gotY * 12 + gotM) * 31 + gotD) * 24 + gotH) * 60 + gotMin;
+          const wantTotal =
+            (((wantY * 12 + wantM) * 31 + wantD) * 24 + hh) * 60 + mm;
+
+          const deltaMinutes = gotTotal - wantTotal;
+          const correctedMs = utcGuessMs - deltaMinutes * 60 * 1000;
+
+          return Math.floor(correctedMs / 1000);
+        };
+
+        const safeGet = (obj, path) => {
+          try {
+            return path
+              .split(".")
+              .reduce((acc, k) => (acc ? acc[k] : undefined), obj);
+          } catch {
+            return undefined;
+          }
+        };
+
+        const collectCandidateArrays = (payload, ymd) => {
+          const candidates = [];
+          const pushIfArray = (x) => {
+            if (Array.isArray(x)) candidates.push(x);
+          };
+
+          pushIfArray(payload?.suggestedSlots);
+          pushIfArray(payload?.slots);
+
+          pushIfArray(payload?.data?.suggestedSlots);
+          pushIfArray(payload?.data?.slots);
+
+          pushIfArray(payload?.[ymd]);
+          pushIfArray(payload?.data?.[ymd]);
+
+          pushIfArray(payload?.freeSlots?.[ymd]);
+          pushIfArray(payload?.data?.freeSlots?.[ymd]);
+
+          pushIfArray(payload?.freeSlots?.slots);
+          pushIfArray(payload?.data?.freeSlots?.slots);
+
+          pushIfArray(safeGet(payload, "data.freeSlots.freeSlots"));
+          pushIfArray(safeGet(payload, "data.freeSlots.suggestedSlots"));
+          pushIfArray(safeGet(payload, "data.freeSlots.slots"));
+
+          if (!candidates.length) return [];
+          return candidates.sort((a, b) => b.length - a.length)[0] || [];
+        };
+
+        const toIso = (v) => {
+          if (v == null) return null;
+          if (typeof v === "string") return v;
+          if (typeof v === "number") {
+            const ms = v < 1e12 ? v * 1000 : v;
+            return new Date(ms).toISOString();
+          }
+          return null;
+        };
+
+        const addMinutesToIso = (iso, mins) => {
+          try {
+            const startMs = new Date(iso).getTime();
+            if (!Number.isFinite(startMs)) return null;
+            return new Date(startMs + mins * 60 * 1000).toISOString();
+          } catch {
+            return null;
+          }
+        };
+
+        const minutesFromMidnightInTz = (iso, tz) => {
+          try {
+            const d = new Date(iso);
+            const parts = new Intl.DateTimeFormat("en-US", {
+              timeZone: tz,
+              hour: "2-digit",
+              minute: "2-digit",
+              hour12: false,
+            }).formatToParts(d);
+
+            const hh = parseInt(parts.find((p) => p.type === "hour")?.value, 10);
+            const mm = parseInt(
+              parts.find((p) => p.type === "minute")?.value,
+              10
+            );
+            if (Number.isNaN(hh) || Number.isNaN(mm)) return null;
+            return hh * 60 + mm;
+          } catch {
+            return null;
+          }
+        };
+
+        try {
+          if (!GHL_API_KEY || !GHL_LOCATION_ID) {
+            console.error(`${logPrefix} Missing env vars`, {
+              hasApiKey: !!GHL_API_KEY,
+              hasLocationId: !!GHL_LOCATION_ID,
+            });
+
+            results.push({
+              toolCallId,
+              result: {
+                success: false,
+                error:
+                  "Server misconfigured: missing GHL_API_KEY or GHL_LOCATION_ID",
+              },
+            });
+            continue;
+          }
+
+          if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+            console.error(`${logPrefix} Invalid date format`, { date });
+            results.push({
+              toolCallId,
+              result: {
+                success: false,
+                error: "Invalid date format. Expected YYYY-MM-DD",
+                date,
+              },
+            });
+            continue;
+          }
+
+          const startDateSeconds = epochSecondsInTimeZone(
+            date,
+            9,
+            0,
+            "America/New_York"
+          );
+          const endDateSeconds = epochSecondsInTimeZone(
+            date,
+            18,
+            0,
+            "America/New_York"
+          );
+
+          const preferredMinutes =
+            preferredTime &&
+            Number.isFinite(Number(preferredTime.hour)) &&
+            Number.isFinite(Number(preferredTime.minute))
+              ? Number(preferredTime.hour) * 60 + Number(preferredTime.minute)
+              : null;
+
+          console.log(`${logPrefix} Checking free slots`, {
+            calendarId,
+            date,
+            timezone,
+            startDateSeconds,
+            endDateSeconds,
+            preferredTime,
+            preferredMinutes,
+          });
+
+          const resp = await axios.get(
+            `https://services.leadconnectorhq.com/calendars/${calendarId}/free-slots`,
+            {
+              headers: {
+                Authorization: `Bearer ${GHL_API_KEY}`,
+                Version: "2023-02-21",
+              },
+              params: {
+                startDate: startDateSeconds,
+                endDate: endDateSeconds,
+                timezone,
+              },
+            }
+          );
+
+          const payload = resp.data || {};
+          const rawSlots = collectCandidateArrays(payload, date);
+
+          console.log(`${logPrefix} Raw response keys`, {
+            topKeys: Object.keys(payload || {}),
+            rawSlotCount: Array.isArray(rawSlots) ? rawSlots.length : 0,
+            rawSlotSample: Array.isArray(rawSlots) ? rawSlots.slice(0, 3) : null,
+          });
+
+          const normalized = [];
+
+          for (const item of rawSlots) {
+            if (item == null) continue;
+
+            // string/number -> START; END = START + durationMinutes
+            if (typeof item === "string" || typeof item === "number") {
+              const startIso = toIso(item);
+              if (!startIso) continue;
+
+              const endIso = addMinutesToIso(startIso, durationMinutes);
+              if (!endIso) continue;
+
+              normalized.push({ start: startIso, end: endIso });
+              continue;
+            }
+
+            // object -> support multiple shapes
+            if (typeof item === "object") {
+              const startIso =
+                toIso(item.start) ||
+                toIso(item.startTime) ||
+                toIso(item.startDate) ||
+                toIso(item.start_date);
+
+              const endIso =
+                toIso(item.end) ||
+                toIso(item.endTime) ||
+                toIso(item.endDate) ||
+                toIso(item.end_date);
+
+              if (startIso && !endIso) {
+                const derivedEnd = addMinutesToIso(startIso, durationMinutes);
+                if (derivedEnd) normalized.push({ start: startIso, end: derivedEnd });
+                continue;
+              }
+
+              if (startIso && endIso) normalized.push({ start: startIso, end: endIso });
+              continue;
+            }
+          }
+
+          console.log(`${logPrefix} Slots normalized`, {
+            normalizedCount: normalized.length,
+            sample: normalized.slice(0, 3),
+          });
+
+          if (!normalized.length) {
+            results.push({
+              toolCallId,
+              result: { success: true, date, timezone, slots: [] },
+            });
+            continue;
+          }
+
+          let picked = [];
+
+          if (preferredMinutes != null) {
+            const scored = normalized
+              .map((slot) => {
+                const slotMins = minutesFromMidnightInTz(slot.start, timezone);
+                const dist =
+                  slotMins == null
+                    ? Number.POSITIVE_INFINITY
+                    : Math.abs(slotMins - preferredMinutes);
+                return { slot, dist };
+              })
+              .sort((a, b) => a.dist - b.dist);
+
+            picked = scored.slice(0, 2).map((x) => x.slot);
+          } else {
+            picked = normalized.slice(0, 2);
+          }
+
+          results.push({
+            toolCallId,
+            result: {
+              success: true,
+              date,
+              timezone,
+              slots: picked.map((s) => ({ start: s.start, end: s.end })),
+            },
+          });
+        } catch (error) {
+          const details = error.response?.data || error.message;
+          console.error(`${logPrefix} Error`, details);
+
+          results.push({
+            toolCallId,
+            result: {
+              success: false,
+              error: "ghl_check_cleaning_availability_webhook failed",
+              details,
             },
           });
         }
