@@ -23,8 +23,12 @@ const GHL_API_KEY = process.env.GHL_API_KEY; // should be PIT: pit-...
 const GHL_LOCATION_ID = process.env.GHL_LOCATION_ID; // m0eRvFrhN4vpEOfZ7EyJ
 
 /* ===========================
-   HEALTH CHECK
+   BASIC ROOT + HEALTH CHECK
 =========================== */
+// Render often probes "/" with HEAD. This avoids noisy 404 logs.
+app.get("/", (req, res) => res.status(200).send("OK"));
+app.head("/", (req, res) => res.sendStatus(200));
+
 app.get("/health", (req, res) => {
   res.status(200).send("OK");
 });
