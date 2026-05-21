@@ -386,6 +386,127 @@ app.post("/tool-calls", async (req, res) => {
 
         continue;
       }
+       /* ---------------------------
+   3) ghl_find_or_create_contact_webhook
+--------------------------- */
+if (name === "ghl_find_or_create_contact_webhook") {
+  const phoneRaw = (args.phone || "").toString();
+  const email = (args.email || "").toString().trim().toLowerCase();
+  const fullName = (args.fullName || "").toString().trim();
+  const firstName = (args.firstName || "").toString().trim();
+  const lastName = (args.lastName || "").toString().trim();
+
+  const digits = phoneRaw.replace(/[^\d]/g, "");
+  let phoneE164 = "";
+  if (digits.length === 10) phoneE164 = `+1${digits}`;
+  else if (digits.length === 11 && digits.startsWith("1")) phoneE164 = `+${digits}`;
+  else if (digits.length >= 11 && digits.length <= 15) phoneE164 = `+${digits}`;
+
+  if (!phoneE164) {
+    results.push({
+      toolCallId,
+      result: { success: false, error: "Invalid phone", phoneRaw }
+    });
+    continue;
+  }
+
+  // Name split fallback
+  let fn = firstName;
+  let ln = lastName;
+  if (!fn && !ln && fullName) {
+    const parts = fullName.split(/\s+/).filter(Boolean);
+    fn = parts[0] || "";
+    ln = parts.slice(1).join(" ");
+  }
+
+  try {
+    // 1) SEARCH (POST /contacts/search)
+    const searchResp = await axios.post(
+      "https://services.leadconnectorhq.com/contacts/search",
+      {
+        locationId: GHL_LOCATION_ID,
+        phone: phoneE164,
+        ...(email ? { email } : {})
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${GHL_API_KEY}`,
+          Version: "2023-02-21",
+          "Content-Type": "application/json"
+        }
+      }
+    );
+
+    const contacts =
+      searchResp.data?.contacts ||
+      searchResp.data?.data?.contacts ||
+      [];
+
+    const found = Array.isArray(contacts) && contacts.length ? contacts[0] : null;
+    const foundId = found?.id;
+
+    if (foundId) {
+      results.push({
+        toolCallId,
+        result: {
+          success: true,
+          action: "found",
+          contactId: foundId,
+          phone: phoneE164,
+          contact: found
+        }
+      });
+      continue;
+    }
+
+    // 2) CREATE (POST /contacts/)
+    const createResp = await axios.post(
+      "https://services.leadconnectorhq.com/contacts/",
+      {
+        locationId: GHL_LOCATION_ID,
+        phone: phoneE164,
+        ...(email ? { email } : {}),
+        ...(fn ? { firstName: fn } : {}),
+        ...(ln ? { lastName: ln } : {})
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${GHL_API_KEY}`,
+          Version: "2023-02-21",
+          "Content-Type": "application/json"
+        }
+      }
+    );
+
+    const contactId =
+      createResp.data?.contact?.id ||
+      createResp.data?.contactId ||
+      createResp.data?.id;
+
+    results.push({
+      toolCallId,
+      result: {
+        success: true,
+        action: "created",
+        contactId: contactId || "",
+        phone: phoneE164,
+        raw: createResp.data
+      }
+    });
+  } catch (error) {
+    results.push({
+      toolCallId,
+      result: {
+        success: false,
+        error: "ghl_find_or_create_contact_webhook failed",
+        details: error.response?.data || error.message,
+        phone: phoneE164
+      }
+    });
+  }
+
+  continue;
+}
 
       /* ---------------------------
          Unknown tool
