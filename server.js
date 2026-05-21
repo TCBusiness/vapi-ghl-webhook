@@ -133,15 +133,34 @@ app.post("/tool-calls", async (req, res) => {
     const results = [];
 
     for (const tc of toolCalls) {
-      const toolCallId = tc.toolCallId;
+      // ✅ FIX (safe): Vapi uses tc.id (OpenAI-style). Keep tc.toolCallId as fallback.
+      const toolCallId = tc.id || tc.toolCallId;
+
       const name = tc.function?.name;
 
       // ✅ normalize arguments
       const args = normalizeArgs(tc.function?.arguments);
 
-      if (!toolCallId || !name) continue;
+      if (!toolCallId || !name) {
+        results.push({
+          toolCallId: toolCallId || "unknown",
+          result: {
+            success: false,
+            error: "Missing toolCallId or tool name in tool call payload",
+            receivedToolCall: tc,
+          },
+        });
+        continue;
+      }
 
-      console.log("🛠️ Tool call:", name, "args:", JSON.stringify(args));
+      console.log(
+        "🛠️ Tool call:",
+        name,
+        "toolCallId:",
+        toolCallId,
+        "args:",
+        JSON.stringify(args)
+      );
 
       /* ---------------------------
          1) parse_datetime_ny
@@ -383,7 +402,10 @@ app.post("/tool-calls", async (req, res) => {
     return res.status(200).json({
       results: [
         {
-          toolCallId: req.body?.message?.toolCallList?.[0]?.toolCallId,
+          toolCallId:
+            req.body?.message?.toolCallList?.[0]?.id ||
+            req.body?.message?.toolCallList?.[0]?.toolCallId ||
+            "unknown",
           result: { success: false, error: err.message },
         },
       ],
