@@ -19,7 +19,7 @@ app.use((req, res, next) => {
 });
 
 const PORT = process.env.PORT || 3000;
-const GHL_API_KEY = process.env.GHL_API_KEY; // should be PIT: pit-...
+const GHL_API_KEY = process.env.GHL_API_KEY; // PIT token (pit-...)
 const GHL_LOCATION_ID = process.env.GHL_LOCATION_ID; // m0eRvFrhN4vpEOfZ7EyJ
 
 /* ===========================
@@ -399,6 +399,7 @@ app.post("/tool-calls", async (req, res) => {
 
       /* ---------------------------
          3) ghl_find_or_create_contact_webhook
+         ✅ Uses /contacts/search/duplicate (working endpoint)
       --------------------------- */
       if (name === "ghl_find_or_create_contact_webhook") {
         const phoneRaw = (args.phone || "").toString();
@@ -427,28 +428,22 @@ app.post("/tool-calls", async (req, res) => {
         }
 
         try {
-          // 1) SEARCH (POST /contacts/search)
-          const searchResp = await axios.post(
-            "https://services.leadconnectorhq.com/contacts/search",
-            {
-              locationId: GHL_LOCATION_ID,
-              phone: phoneE164,
-              ...(email ? { email } : {}),
-            },
+          // 1) SEARCH (GET /contacts/search/duplicate)
+          const dupResp = await axios.get(
+            "https://services.leadconnectorhq.com/contacts/search/duplicate",
             {
               headers: {
                 Authorization: `Bearer ${GHL_API_KEY}`,
                 Version: "2023-02-21",
-                "Content-Type": "application/json",
+              },
+              params: {
+                locationId: GHL_LOCATION_ID,
+                number: phoneE164,
               },
             }
           );
 
-          const contacts =
-            searchResp.data?.contacts || searchResp.data?.data?.contacts || [];
-
-          const found =
-            Array.isArray(contacts) && contacts.length ? contacts[0] : null;
+          const found = dupResp.data?.contact || null;
           const foundId = found?.id;
 
           if (foundId) {
