@@ -1,3 +1,4 @@
+// server.js
 const express = require("express");
 const axios = require("axios");
 
@@ -18,8 +19,8 @@ app.use((req, res, next) => {
 });
 
 const PORT = process.env.PORT || 3000;
-const GHL_API_KEY = process.env.GHL_API_KEY;
-const GHL_LOCATION_ID = process.env.GHL_LOCATION_ID; // used for SMS/contact search
+const GHL_API_KEY = process.env.GHL_API_KEY; // should be PIT: pit-...
+const GHL_LOCATION_ID = process.env.GHL_LOCATION_ID; // m0eRvFrhN4vpEOfZ7EyJ
 
 /* ===========================
    HEALTH CHECK
@@ -113,6 +114,14 @@ function normalizeArgs(maybeArgs) {
   return {};
 }
 
+function toE164(phoneRaw) {
+  const digits = String(phoneRaw || "").replace(/[^\d]/g, "");
+  if (digits.length === 10) return `+1${digits}`;
+  if (digits.length === 11 && digits.startsWith("1")) return `+${digits}`;
+  if (digits.length >= 11 && digits.length <= 15) return `+${digits}`;
+  return "";
+}
+
 /* ===========================
    VAPI TOOL CALLS (LIVE)
 =========================== */
@@ -133,12 +142,11 @@ app.post("/tool-calls", async (req, res) => {
     const results = [];
 
     for (const tc of toolCalls) {
-      // ✅ FIX (safe): Vapi uses tc.id (OpenAI-style). Keep tc.toolCallId as fallback.
+      // Vapi uses tc.id (OpenAI-style). Keep tc.toolCallId as fallback.
       const toolCallId = tc.id || tc.toolCallId;
-
       const name = tc.function?.name;
 
-      // ✅ normalize arguments
+      // normalize arguments
       const args = normalizeArgs(tc.function?.arguments);
 
       if (!toolCallId || !name) {
@@ -298,7 +306,7 @@ app.post("/tool-calls", async (req, res) => {
       --------------------------- */
       if (name === "ghl_availability_day") {
         const calendarId = (args.calendarId || "").toString();
-        const dateText = (args.dateText || "").toString();
+        const dateText = (args.dateText || "").toString(); // expecting MM-DD-YYYY
         const timezone = (args.timezone || "America/New_York").toString();
         const durationMinutes = Number(args.durationMinutes || 60);
 
@@ -316,9 +324,7 @@ app.post("/tool-calls", async (req, res) => {
           continue;
         }
 
-        const dateMMDDYYYY = dateText;
-
-        const window = buildBusinessWindowEpochMs(dateMMDDYYYY);
+        const window = buildBusinessWindowEpochMs(dateText);
         if (!window || !window.startDateMs || !window.endDateMs) {
           results.push({
             toolCallId,
@@ -331,7 +337,7 @@ app.post("/tool-calls", async (req, res) => {
           continue;
         }
 
-        // ✅ GHL expects seconds (not ms) for startDate/endDate on this endpoint
+        // GHL expects seconds (not ms) for startDate/endDate on this endpoint
         const startDateSeconds = Math.floor(window.startDateMs / 1000);
         const endDateSeconds = Math.floor(window.endDateMs / 1000);
 
@@ -341,7 +347,7 @@ app.post("/tool-calls", async (req, res) => {
             {
               headers: {
                 Authorization: `Bearer ${GHL_API_KEY}`,
-                Version: "2021-07-28",
+                Version: "2023-02-21",
               },
               params: {
                 startDate: startDateSeconds,
@@ -356,7 +362,7 @@ app.post("/tool-calls", async (req, res) => {
             result: {
               success: true,
               calendarId,
-              date: dateMMDDYYYY,
+              date: dateText,
               timezone,
               businessHours: "09:00-18:00",
               startDateSeconds,
@@ -375,7 +381,7 @@ app.post("/tool-calls", async (req, res) => {
               error: "ghl_availability_day failed",
               details,
               calendarId,
-              date: dateMMDDYYYY,
+              date: dateText,
               timezone,
               businessHours: "09:00-18:00",
               startDateSeconds,
@@ -386,127 +392,123 @@ app.post("/tool-calls", async (req, res) => {
 
         continue;
       }
-       /* ---------------------------
-   3) ghl_find_or_create_contact_webhook
---------------------------- */
-if (name === "ghl_find_or_create_contact_webhook") {
-  const phoneRaw = (args.phone || "").toString();
-  const email = (args.email || "").toString().trim().toLowerCase();
-  const fullName = (args.fullName || "").toString().trim();
-  const firstName = (args.firstName || "").toString().trim();
-  const lastName = (args.lastName || "").toString().trim();
 
-  const digits = phoneRaw.replace(/[^\d]/g, "");
-  let phoneE164 = "";
-  if (digits.length === 10) phoneE164 = `+1${digits}`;
-  else if (digits.length === 11 && digits.startsWith("1")) phoneE164 = `+${digits}`;
-  else if (digits.length >= 11 && digits.length <= 15) phoneE164 = `+${digits}`;
+      /* ---------------------------
+         3) ghl_find_or_create_contact_webhook
+      --------------------------- */
+      if (name === "ghl_find_or_create_contact_webhook") {
+        const phoneRaw = (args.phone || "").toString();
+        const email = (args.email || "").toString().trim().toLowerCase();
+        const fullName = (args.fullName || "").toString().trim();
+        const firstName = (args.firstName || "").toString().trim();
+        const lastName = (args.lastName || "").toString().trim();
 
-  if (!phoneE164) {
-    results.push({
-      toolCallId,
-      result: { success: false, error: "Invalid phone", phoneRaw }
-    });
-    continue;
-  }
+        const phoneE164 = toE164(phoneRaw);
 
-  // Name split fallback
-  let fn = firstName;
-  let ln = lastName;
-  if (!fn && !ln && fullName) {
-    const parts = fullName.split(/\s+/).filter(Boolean);
-    fn = parts[0] || "";
-    ln = parts.slice(1).join(" ");
-  }
-
-  try {
-    // 1) SEARCH (POST /contacts/search)
-    const searchResp = await axios.post(
-      "https://services.leadconnectorhq.com/contacts/search",
-      {
-        locationId: GHL_LOCATION_ID,
-        phone: phoneE164,
-        ...(email ? { email } : {})
-      },
-      {
-        headers: {
-          Authorization: `Bearer ${GHL_API_KEY}`,
-          Version: "2023-02-21",
-          "Content-Type": "application/json"
+        if (!phoneE164) {
+          results.push({
+            toolCallId,
+            result: { success: false, error: "Invalid phone", phoneRaw },
+          });
+          continue;
         }
-      }
-    );
 
-    const contacts =
-      searchResp.data?.contacts ||
-      searchResp.data?.data?.contacts ||
-      [];
-
-    const found = Array.isArray(contacts) && contacts.length ? contacts[0] : null;
-    const foundId = found?.id;
-
-    if (foundId) {
-      results.push({
-        toolCallId,
-        result: {
-          success: true,
-          action: "found",
-          contactId: foundId,
-          phone: phoneE164,
-          contact: found
+        // Name split fallback
+        let fn = firstName;
+        let ln = lastName;
+        if (!fn && !ln && fullName) {
+          const parts = fullName.split(/\s+/).filter(Boolean);
+          fn = parts[0] || "";
+          ln = parts.slice(1).join(" ");
         }
-      });
-      continue;
-    }
 
-    // 2) CREATE (POST /contacts/)
-    const createResp = await axios.post(
-      "https://services.leadconnectorhq.com/contacts/",
-      {
-        locationId: GHL_LOCATION_ID,
-        phone: phoneE164,
-        ...(email ? { email } : {}),
-        ...(fn ? { firstName: fn } : {}),
-        ...(ln ? { lastName: ln } : {})
-      },
-      {
-        headers: {
-          Authorization: `Bearer ${GHL_API_KEY}`,
-          Version: "2023-02-21",
-          "Content-Type": "application/json"
+        try {
+          // 1) SEARCH (POST /contacts/search)
+          const searchResp = await axios.post(
+            "https://services.leadconnectorhq.com/contacts/search",
+            {
+              locationId: GHL_LOCATION_ID,
+              phone: phoneE164,
+              ...(email ? { email } : {}),
+            },
+            {
+              headers: {
+                Authorization: `Bearer ${GHL_API_KEY}`,
+                Version: "2023-02-21",
+                "Content-Type": "application/json",
+              },
+            }
+          );
+
+          const contacts =
+            searchResp.data?.contacts || searchResp.data?.data?.contacts || [];
+
+          const found =
+            Array.isArray(contacts) && contacts.length ? contacts[0] : null;
+          const foundId = found?.id;
+
+          if (foundId) {
+            results.push({
+              toolCallId,
+              result: {
+                success: true,
+                action: "found",
+                contactId: foundId,
+                phone: phoneE164,
+                contact: found,
+              },
+            });
+            continue;
+          }
+
+          // 2) CREATE (POST /contacts/)
+          const createResp = await axios.post(
+            "https://services.leadconnectorhq.com/contacts/",
+            {
+              locationId: GHL_LOCATION_ID,
+              phone: phoneE164,
+              ...(email ? { email } : {}),
+              ...(fn ? { firstName: fn } : {}),
+              ...(ln ? { lastName: ln } : {}),
+            },
+            {
+              headers: {
+                Authorization: `Bearer ${GHL_API_KEY}`,
+                Version: "2023-02-21",
+                "Content-Type": "application/json",
+              },
+            }
+          );
+
+          const contactId =
+            createResp.data?.contact?.id ||
+            createResp.data?.contactId ||
+            createResp.data?.id;
+
+          results.push({
+            toolCallId,
+            result: {
+              success: true,
+              action: "created",
+              contactId: contactId || "",
+              phone: phoneE164,
+              raw: createResp.data,
+            },
+          });
+        } catch (error) {
+          results.push({
+            toolCallId,
+            result: {
+              success: false,
+              error: "ghl_find_or_create_contact_webhook failed",
+              details: error.response?.data || error.message,
+              phone: phoneE164,
+            },
+          });
         }
-      }
-    );
 
-    const contactId =
-      createResp.data?.contact?.id ||
-      createResp.data?.contactId ||
-      createResp.data?.id;
-
-    results.push({
-      toolCallId,
-      result: {
-        success: true,
-        action: "created",
-        contactId: contactId || "",
-        phone: phoneE164,
-        raw: createResp.data
+        continue;
       }
-    });
-  } catch (error) {
-    results.push({
-      toolCallId,
-      result: {
-        success: false,
-        error: "ghl_find_or_create_contact_webhook failed",
-        details: error.response?.data || error.message,
-        phone: phoneE164
-      }
-    });
-  }
-
-  continue;
-}
 
       /* ---------------------------
          Unknown tool
@@ -544,7 +546,7 @@ async function sendFollowUpSMS(phone) {
       {
         headers: {
           Authorization: `Bearer ${GHL_API_KEY}`,
-          Version: "2021-07-28",
+          Version: "2023-02-21",
         },
         params: {
           locationId: GHL_LOCATION_ID,
@@ -573,7 +575,7 @@ async function sendFollowUpSMS(phone) {
       {
         headers: {
           Authorization: `Bearer ${GHL_API_KEY}`,
-          Version: "2021-07-28",
+          Version: "2023-02-21",
           "Content-Type": "application/json",
         },
       }
