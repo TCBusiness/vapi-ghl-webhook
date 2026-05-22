@@ -162,16 +162,6 @@ function toIso(v) {
   return null;
 }
 
-function addMinutesToIso(iso, mins) {
-  try {
-    const startMs = new Date(iso).getTime();
-    if (!Number.isFinite(startMs)) return null;
-    return new Date(startMs + mins * 60 * 1000).toISOString();
-  } catch {
-    return null;
-  }
-}
-
 function minutesFromMidnightInTz(iso, tz) {
   try {
     const d = new Date(iso);
@@ -191,9 +181,13 @@ function minutesFromMidnightInTz(iso, tz) {
   }
 }
 
-async function fetchCleaningAvailability({ date, timezone, preferredTime, toolCallId = "debug" }) {
+async function fetchCleaningAvailability({
+  date,
+  timezone,
+  preferredTime,
+  toolCallId = "debug",
+}) {
   const calendarId = "y53J9Fbsd5Xz0bwUiE4K";
-  const durationMinutes = 60;
   const logPrefix = `[ghl_check_cleaning_availability_webhook] toolCallId=${toolCallId}`;
 
   if (!GHL_API_KEY || !GHL_LOCATION_ID) {
@@ -279,11 +273,7 @@ async function fetchCleaningAvailability({ date, timezone, preferredTime, toolCa
     if (typeof item === "string" || typeof item === "number") {
       const startIso = toIso(item);
       if (!startIso) continue;
-
-      const endIso = addMinutesToIso(startIso, durationMinutes);
-      if (!endIso) continue;
-
-      normalized.push({ start: startIso, end: endIso });
+      normalized.push({ start: startIso });
       continue;
     }
 
@@ -294,20 +284,8 @@ async function fetchCleaningAvailability({ date, timezone, preferredTime, toolCa
         toIso(item.startDate) ||
         toIso(item.start_date);
 
-      const endIso =
-        toIso(item.end) ||
-        toIso(item.endTime) ||
-        toIso(item.endDate) ||
-        toIso(item.end_date);
-
-      if (startIso && !endIso) {
-        const derivedEnd = addMinutesToIso(startIso, durationMinutes);
-        if (derivedEnd) normalized.push({ start: startIso, end: derivedEnd });
-        continue;
-      }
-
-      if (startIso && endIso) {
-        normalized.push({ start: startIso, end: endIso });
+      if (startIso) {
+        normalized.push({ start: startIso });
       }
     }
   }
@@ -339,7 +317,7 @@ async function fetchCleaningAvailability({ date, timezone, preferredTime, toolCa
     success: true,
     date,
     timezone,
-    slots: picked.map((s) => ({ start: s.start, end: s.end })),
+    slots: picked.map((s) => ({ start: s.start })),
   };
 
   return {
