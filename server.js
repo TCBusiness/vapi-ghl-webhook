@@ -164,7 +164,6 @@ app.post("/tool-calls", async (req, res) => {
           continue;
         }
 
-        // Name split fallback
         let fn = firstName;
         let ln = lastName;
         if (!fn && !ln && fullName) {
@@ -176,7 +175,6 @@ app.post("/tool-calls", async (req, res) => {
         const logPrefix = `[ghl_find_or_create_contact_webhook] toolCallId=${toolCallId}`;
 
         try {
-          // 1) SEARCH (GET /contacts/search/duplicate)
           const dupResp = await axios.get(
             "https://services.leadconnectorhq.com/contacts/search/duplicate",
             {
@@ -208,7 +206,6 @@ app.post("/tool-calls", async (req, res) => {
             continue;
           }
 
-          // 2) CREATE (POST /contacts/)
           const createResp = await axios.post(
             "https://services.leadconnectorhq.com/contacts/",
             {
@@ -261,12 +258,11 @@ app.post("/tool-calls", async (req, res) => {
       }
 
       /* ---------------------------
-         ghl_check_cleaning_availability_webhook (FINAL v2)
+         ghl_check_cleaning_availability_webhook
       --------------------------- */
       if (name === "ghl_check_cleaning_availability_webhook") {
         const calendarId = "y53J9Fbsd5Xz0bwUiE4K";
         const timezone = (args.timezone || "America/New_York").toString();
-
         const date = (args.date || "").toString().trim(); // YYYY-MM-DD
         const durationMinutes = 60;
 
@@ -277,7 +273,7 @@ app.post("/tool-calls", async (req, res) => {
 
         const logPrefix = `[ghl_check_cleaning_availability_webhook] toolCallId=${toolCallId}`;
 
-        const epochSecondsInTimeZone = (ymd, hh, mm, tz) => {
+        const epochMsInTimeZone = (ymd, hh, mm, tz) => {
           const utcGuessMs = Date.UTC(
             Number(ymd.slice(0, 4)),
             Number(ymd.slice(5, 7)) - 1,
@@ -313,7 +309,7 @@ app.post("/tool-calls", async (req, res) => {
               Number.isNaN(x)
             )
           ) {
-            return Math.floor(utcGuessMs / 1000);
+            return utcGuessMs;
           }
 
           const gotTotal =
@@ -324,7 +320,7 @@ app.post("/tool-calls", async (req, res) => {
           const deltaMinutes = gotTotal - wantTotal;
           const correctedMs = utcGuessMs - deltaMinutes * 60 * 1000;
 
-          return Math.floor(correctedMs / 1000);
+          return correctedMs;
         };
 
         const safeGet = (obj, path) => {
@@ -439,18 +435,8 @@ app.post("/tool-calls", async (req, res) => {
             continue;
           }
 
-          const startDateSeconds = epochSecondsInTimeZone(
-            date,
-            9,
-            0,
-            "America/New_York"
-          );
-          const endDateSeconds = epochSecondsInTimeZone(
-            date,
-            18,
-            0,
-            "America/New_York"
-          );
+          const startDate = epochMsInTimeZone(date, 9, 0, "America/New_York");
+          const endDate = epochMsInTimeZone(date, 18, 0, "America/New_York");
 
           const preferredMinutes =
             preferredTime &&
@@ -459,12 +445,19 @@ app.post("/tool-calls", async (req, res) => {
               ? Number(preferredTime.hour) * 60 + Number(preferredTime.minute)
               : null;
 
+          console.log(`${logPrefix} start/end (ms)`, {
+            startDate,
+            endDate,
+            startDateDigits: String(startDate).length,
+            endDateDigits: String(endDate).length,
+          });
+
           console.log(`${logPrefix} Checking free slots`, {
             calendarId,
             date,
             timezone,
-            startDateSeconds,
-            endDateSeconds,
+            startDate,
+            endDate,
             preferredTime,
             preferredMinutes,
           });
@@ -477,8 +470,8 @@ app.post("/tool-calls", async (req, res) => {
                 Version: "2023-02-21",
               },
               params: {
-                startDate: startDateSeconds,
-                endDate: endDateSeconds,
+                startDate,
+                endDate,
                 timezone,
               },
             }
@@ -498,7 +491,6 @@ app.post("/tool-calls", async (req, res) => {
           for (const item of rawSlots) {
             if (item == null) continue;
 
-            // string/number -> START; END = START + durationMinutes
             if (typeof item === "string" || typeof item === "number") {
               const startIso = toIso(item);
               if (!startIso) continue;
@@ -510,7 +502,6 @@ app.post("/tool-calls", async (req, res) => {
               continue;
             }
 
-            // object -> support multiple shapes
             if (typeof item === "object") {
               const startIso =
                 toIso(item.start) ||
@@ -530,7 +521,9 @@ app.post("/tool-calls", async (req, res) => {
                 continue;
               }
 
-              if (startIso && endIso) normalized.push({ start: startIso, end: endIso });
+              if (startIso && endIso) {
+                normalized.push({ start: startIso, end: endIso });
+              }
               continue;
             }
           }
@@ -577,14 +570,16 @@ app.post("/tool-calls", async (req, res) => {
             },
           });
         } catch (error) {
+          const status = error.response?.status || null;
           const details = error.response?.data || error.message;
-          console.error(`${logPrefix} Error`, details);
+          console.error(`${logPrefix} Error`, { status, details });
 
           results.push({
             toolCallId,
             result: {
               success: false,
               error: "ghl_check_cleaning_availability_webhook failed",
+              status,
               details,
             },
           });
