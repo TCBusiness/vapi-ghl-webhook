@@ -119,6 +119,70 @@ function toE164(phoneRaw) {
   return "";
 }
 
+function isValidYYYYMMDD(s) {
+  if (typeof s !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(s)) return false;
+  const [year, month, day] = s.split("-").map(Number);
+  const dt = new Date(Date.UTC(year, month - 1, day));
+  return (
+    dt.getUTCFullYear() === year &&
+    dt.getUTCMonth() === month - 1 &&
+    dt.getUTCDate() === day
+  );
+}
+
+function ymdInTimeZone(tz = "America/New_York") {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: tz,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(new Date());
+
+  const year = parts.find((p) => p.type === "year")?.value;
+  const month = parts.find((p) => p.type === "month")?.value;
+  const day = parts.find((p) => p.type === "day")?.value;
+
+  if (!year || !month || !day) {
+    throw new Error(`Failed to derive current date for timezone: ${tz}`);
+  }
+
+  return `${year}-${month}-${day}`;
+}
+
+function compareYYYYMMDD(a, b) {
+  if (a < b) return -1;
+  if (a > b) return 1;
+  return 0;
+}
+
+function invalidDateFinalResult({ date, timezone, serviceType }) {
+  const base = {
+    success: false,
+    errorCode: "invalid_date",
+    message:
+      "The requested date is invalid or unclear. Please provide a valid future date in YYYY-MM-DD format.",
+    date,
+    timezone: timezone || "America/New_York",
+    slots: [],
+  };
+
+  return serviceType ? { ...base, serviceType } : base;
+}
+
+function dateInPastFinalResult({ date, timezone, serviceType }) {
+  const base = {
+    success: false,
+    errorCode: "date_in_past",
+    message:
+      "The requested date is in the past. Please provide a future date.",
+    date,
+    timezone: timezone || "America/New_York",
+    slots: [],
+  };
+
+  return serviceType ? { ...base, serviceType } : base;
+}
+
 function epochMsInTimeZone(ymd, hh, mm, tz) {
   const utcGuessMs = Date.UTC(
     Number(ymd.slice(0, 4)),
@@ -260,8 +324,31 @@ async function fetchCleaningAvailability({
     throw new Error("Server misconfigured: missing GHL_API_KEY or GHL_LOCATION_ID");
   }
 
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
-    throw new Error("Invalid date format. Expected YYYY-MM-DD");
+  if (!isValidYYYYMMDD(date)) {
+    console.log(`${logPrefix} rejected invalid date`, { date, timezone });
+    return {
+      finalResult: invalidDateFinalResult({
+        date,
+        timezone,
+        serviceType: "cleaning",
+      }),
+    };
+  }
+
+  const todayYMD = ymdInTimeZone("America/New_York");
+  if (compareYYYYMMDD(date, todayYMD) < 0) {
+    console.log(`${logPrefix} rejected past date`, {
+      date,
+      todayYMD,
+      timezone,
+    });
+    return {
+      finalResult: dateInPastFinalResult({
+        date,
+        timezone,
+        serviceType: "cleaning",
+      }),
+    };
   }
 
   const startDate = epochMsInTimeZone(date, 9, 0, "America/New_York");
@@ -420,8 +507,32 @@ async function fetchServiceAvailability({
     throw new Error("Server misconfigured: missing GHL_API_KEY or GHL_LOCATION_ID");
   }
 
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
-    throw new Error("Invalid date format. Expected YYYY-MM-DD");
+  if (!isValidYYYYMMDD(date)) {
+    console.log(`${logPrefix} rejected invalid date`, { date, timezone, serviceType });
+    return {
+      finalResult: invalidDateFinalResult({
+        date,
+        timezone,
+        serviceType,
+      }),
+    };
+  }
+
+  const todayYMD = ymdInTimeZone("America/New_York");
+  if (compareYYYYMMDD(date, todayYMD) < 0) {
+    console.log(`${logPrefix} rejected past date`, {
+      date,
+      todayYMD,
+      timezone,
+      serviceType,
+    });
+    return {
+      finalResult: dateInPastFinalResult({
+        date,
+        timezone,
+        serviceType,
+      }),
+    };
   }
 
   const startDate = epochMsInTimeZone(date, 9, 0, "America/New_York");
