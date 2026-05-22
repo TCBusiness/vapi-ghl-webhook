@@ -1,4 +1,3 @@
-// server.js
 const express = require("express");
 const axios = require("axios");
 
@@ -19,19 +18,344 @@ app.use((req, res, next) => {
 });
 
 const PORT = process.env.PORT || 3000;
-const GHL_API_KEY = process.env.GHL_API_KEY; // PIT token (pit-...)
-const GHL_LOCATION_ID = process.env.GHL_LOCATION_ID; // m0eRvFrhN4vpEOfZ7EyJ
+const GHL_API_KEY = process.env.GHL_API_KEY;
+const GHL_LOCATION_ID = process.env.GHL_LOCATION_ID;
 
 /* ===========================
    BASIC ROOT + HEALTH CHECK
 =========================== */
-// Render often probes "/" with HEAD. This avoids noisy 404 logs.
 app.get("/", (req, res) => res.status(200).send("OK"));
 app.head("/", (req, res) => res.sendStatus(200));
+app.get("/health", (req, res) => res.status(200).send("OK"));
 
-app.get("/health", (req, res) => {
-  res.status(200).send("OK");
-});
+/* ===========================
+   HELPERS
+=========================== */
+function normalizeArgs(maybeArgs) {
+  if (maybeArgs == null) return {};
+  if (typeof maybeArgs === "object") return maybeArgs;
+  if (typeof maybeArgs === "string") {
+    try {
+      const parsed = JSON.parse(maybeArgs);
+      return typeof parsed === "object" && parsed != null ? parsed : {};
+    } catch {
+      return {};
+    }
+  }
+  return {};
+}
+
+function toE164(phoneRaw) {
+  const digits = String(phoneRaw || "").replace(/[^\d]/g, "");
+  if (digits.length === 10) return `+1${digits}`;
+  if (digits.length === 11 && digits.startsWith("1")) return `+${digits}`;
+  if (digits.length >= 11 && digits.length <= 15) return `+${digits}`;
+  return "";
+}
+
+function epochMsInTimeZone(ymd, hh, mm, tz) {
+  const utcGuessMs = Date.UTC(
+    Number(ymd.slice(0, 4)),
+    Number(ymd.slice(5, 7)) - 1,
+    Number(ymd.slice(8, 10)),
+    hh,
+    mm,
+    0
+  );
+
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: tz,
+    hour12: false,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  }).formatToParts(new Date(utcGuessMs));
+
+  const gotY = Number(parts.find((p) => p.type === "year")?.value);
+  const gotM = Number(parts.find((p) => p.type === "month")?.value);
+  const gotD = Number(parts.find((p) => p.type === "day")?.value);
+  const gotH = Number(parts.find((p) => p.type === "hour")?.value);
+  const gotMin = Number(parts.find((p) => p.type === "minute")?.value);
+
+  const wantY = Number(ymd.slice(0, 4));
+  const wantM = Number(ymd.slice(5, 7));
+  const wantD = Number(ymd.slice(8, 10));
+
+  if (
+    [gotY, gotM, gotD, gotH, gotMin, wantY, wantM, wantD].some((x) =>
+      Number.isNaN(x)
+    )
+  ) {
+    return utcGuessMs;
+  }
+
+  const gotTotal =
+    (((gotY * 12 + gotM) * 31 + gotD) * 24 + gotH) * 60 + gotMin;
+  const wantTotal =
+    (((wantY * 12 + wantM) * 31 + wantD) * 24 + hh) * 60 + mm;
+
+  const deltaMinutes = gotTotal - wantTotal;
+  const correctedMs = utcGuessMs - deltaMinutes * 60 * 1000;
+
+  return correctedMs;
+}
+
+function safeGet(obj, path) {
+  try {
+    return path.split(".").reduce((acc, k) => (acc ? acc[k] : undefined), obj);
+  } catch {
+    return undefined;
+  }
+}
+
+function collectCandidateArrays(payload, ymd) {
+  const candidates = [];
+  const pushIfArray = (x) => {
+    if (Array.isArray(x)) candidates.push(x);
+  };
+
+  const pushObjectValueArrays = (obj) => {
+    if (!obj || typeof obj !== "object" || Array.isArray(obj)) return;
+    for (const value of Object.values(obj)) {
+      if (Array.isArray(value)) candidates.push(value);
+    }
+  };
+
+  pushIfArray(payload?.suggestedSlots);
+  pushIfArray(payload?.slots);
+  pushIfArray(payload?.data?.suggestedSlots);
+  pushIfArray(payload?.data?.slots);
+
+  pushIfArray(payload?.[ymd]);
+  pushIfArray(payload?.[ymd]?.slots);
+  pushIfArray(payload?.[ymd]?.freeSlots);
+  pushIfArray(payload?.[ymd]?.suggestedSlots);
+  pushIfArray(payload?.[ymd]?.data?.slots);
+  pushIfArray(payload?.[ymd]?.data?.freeSlots);
+  pushIfArray(payload?.[ymd]?.data?.suggestedSlots);
+  pushObjectValueArrays(payload?.[ymd]);
+
+  pushIfArray(payload?.data?.[ymd]);
+  pushIfArray(payload?.freeSlots?.[ymd]);
+  pushIfArray(payload?.data?.freeSlots?.[ymd]);
+  pushIfArray(payload?.freeSlots?.slots);
+  pushIfArray(payload?.data?.freeSlots?.slots);
+
+  pushIfArray(safeGet(payload, "data.freeSlots.freeSlots"));
+  pushIfArray(safeGet(payload, "data.freeSlots.suggestedSlots"));
+  pushIfArray(safeGet(payload, "data.freeSlots.slots"));
+
+  if (!candidates.length) return [];
+  return candidates.sort((a, b) => b.length - a.length)[0] || [];
+}
+
+function toIso(v) {
+  if (v == null) return null;
+  if (typeof v === "string") return v;
+  if (typeof v === "number") {
+    const ms = v < 1e12 ? v * 1000 : v;
+    return new Date(ms).toISOString();
+  }
+  return null;
+}
+
+function addMinutesToIso(iso, mins) {
+  try {
+    const startMs = new Date(iso).getTime();
+    if (!Number.isFinite(startMs)) return null;
+    return new Date(startMs + mins * 60 * 1000).toISOString();
+  } catch {
+    return null;
+  }
+}
+
+function minutesFromMidnightInTz(iso, tz) {
+  try {
+    const d = new Date(iso);
+    const parts = new Intl.DateTimeFormat("en-US", {
+      timeZone: tz,
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false,
+    }).formatToParts(d);
+
+    const hh = parseInt(parts.find((p) => p.type === "hour")?.value, 10);
+    const mm = parseInt(parts.find((p) => p.type === "minute")?.value, 10);
+    if (Number.isNaN(hh) || Number.isNaN(mm)) return null;
+    return hh * 60 + mm;
+  } catch {
+    return null;
+  }
+}
+
+async function fetchCleaningAvailability({ date, timezone, preferredTime, toolCallId = "debug" }) {
+  const calendarId = "y53J9Fbsd5Xz0bwUiE4K";
+  const durationMinutes = 60;
+  const logPrefix = `[ghl_check_cleaning_availability_webhook] toolCallId=${toolCallId}`;
+
+  if (!GHL_API_KEY || !GHL_LOCATION_ID) {
+    throw new Error("Server misconfigured: missing GHL_API_KEY or GHL_LOCATION_ID");
+  }
+
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+    throw new Error("Invalid date format. Expected YYYY-MM-DD");
+  }
+
+  const startDate = epochMsInTimeZone(date, 9, 0, "America/New_York");
+  const endDate = epochMsInTimeZone(date, 18, 0, "America/New_York");
+
+  const preferredMinutes =
+    preferredTime &&
+    Number.isFinite(Number(preferredTime.hour)) &&
+    Number.isFinite(Number(preferredTime.minute))
+      ? Number(preferredTime.hour) * 60 + Number(preferredTime.minute)
+      : null;
+
+  console.log(`${logPrefix} start/end (ms)`, {
+    startDate,
+    endDate,
+    startDateDigits: String(startDate).length,
+    endDateDigits: String(endDate).length,
+  });
+
+  console.log(`${logPrefix} Checking free slots`, {
+    calendarId,
+    date,
+    timezone,
+    startDate,
+    endDate,
+    preferredTime,
+    preferredMinutes,
+  });
+
+  const resp = await axios.get(
+    `https://services.leadconnectorhq.com/calendars/${calendarId}/free-slots`,
+    {
+      headers: {
+        Authorization: `Bearer ${GHL_API_KEY}`,
+        Version: "2023-02-21",
+      },
+      params: {
+        startDate,
+        endDate,
+        timezone,
+      },
+    }
+  );
+
+  const payload = resp.data || {};
+  const rawSlots = collectCandidateArrays(payload, date);
+
+  console.log(`${logPrefix} Raw response keys`, {
+    topKeys: Object.keys(payload || {}),
+    rawSlotCount: Array.isArray(rawSlots) ? rawSlots.length : 0,
+    rawSlotSample: Array.isArray(rawSlots) ? rawSlots.slice(0, 3) : null,
+  });
+
+  const dateNode = payload?.[date];
+  const dateNodeType = typeof dateNode;
+  const dateNodeIsArray = Array.isArray(dateNode);
+  const dateNodeKeys =
+    dateNode && typeof dateNode === "object" && !Array.isArray(dateNode)
+      ? Object.keys(dateNode)
+      : [];
+
+  console.log(`${logPrefix} DEBUG payload`, payload);
+  console.log(`${logPrefix} DEBUG payload[date]`, dateNode);
+  console.log(`${logPrefix} DEBUG typeof payload[date]`, dateNodeType);
+  console.log(`${logPrefix} DEBUG Array.isArray(payload[date])`, dateNodeIsArray);
+  if (dateNode && typeof dateNode === "object" && !Array.isArray(dateNode)) {
+    console.log(`${logPrefix} DEBUG Object.keys(payload[date])`, dateNodeKeys);
+  }
+
+  const normalized = [];
+
+  for (const item of rawSlots) {
+    if (item == null) continue;
+
+    if (typeof item === "string" || typeof item === "number") {
+      const startIso = toIso(item);
+      if (!startIso) continue;
+
+      const endIso = addMinutesToIso(startIso, durationMinutes);
+      if (!endIso) continue;
+
+      normalized.push({ start: startIso, end: endIso });
+      continue;
+    }
+
+    if (typeof item === "object") {
+      const startIso =
+        toIso(item.start) ||
+        toIso(item.startTime) ||
+        toIso(item.startDate) ||
+        toIso(item.start_date);
+
+      const endIso =
+        toIso(item.end) ||
+        toIso(item.endTime) ||
+        toIso(item.endDate) ||
+        toIso(item.end_date);
+
+      if (startIso && !endIso) {
+        const derivedEnd = addMinutesToIso(startIso, durationMinutes);
+        if (derivedEnd) normalized.push({ start: startIso, end: derivedEnd });
+        continue;
+      }
+
+      if (startIso && endIso) {
+        normalized.push({ start: startIso, end: endIso });
+      }
+    }
+  }
+
+  console.log(`${logPrefix} Slots normalized`, {
+    normalizedCount: normalized.length,
+    sample: normalized.slice(0, 3),
+  });
+
+  let picked = [];
+  if (preferredMinutes != null) {
+    const scored = normalized
+      .map((slot) => {
+        const slotMins = minutesFromMidnightInTz(slot.start, timezone);
+        const dist =
+          slotMins == null
+            ? Number.POSITIVE_INFINITY
+            : Math.abs(slotMins - preferredMinutes);
+        return { slot, dist };
+      })
+      .sort((a, b) => a.dist - b.dist);
+
+    picked = scored.slice(0, 2).map((x) => x.slot);
+  } else {
+    picked = normalized.slice(0, 2);
+  }
+
+  const finalResult = {
+    success: true,
+    date,
+    timezone,
+    slots: picked.map((s) => ({ start: s.start, end: s.end })),
+  };
+
+  return {
+    startDate,
+    endDate,
+    payload,
+    dateNode,
+    dateNodeType,
+    dateNodeIsArray,
+    dateNodeKeys,
+    rawSlots,
+    normalized,
+    picked,
+    finalResult,
+  };
+}
 
 /* ===========================
    VAPI WEBHOOK (END-OF-CALL)
@@ -73,33 +397,6 @@ app.post("/vapi-webhook", async (req, res) => {
 });
 
 /* ===========================
-   HELPERS
-=========================== */
-
-function normalizeArgs(maybeArgs) {
-  // Vapi can send arguments as an object OR as a JSON string.
-  if (maybeArgs == null) return {};
-  if (typeof maybeArgs === "object") return maybeArgs;
-  if (typeof maybeArgs === "string") {
-    try {
-      const parsed = JSON.parse(maybeArgs);
-      return typeof parsed === "object" && parsed != null ? parsed : {};
-    } catch (e) {
-      return {};
-    }
-  }
-  return {};
-}
-
-function toE164(phoneRaw) {
-  const digits = String(phoneRaw || "").replace(/[^\d]/g, "");
-  if (digits.length === 10) return `+1${digits}`;
-  if (digits.length === 11 && digits.startsWith("1")) return `+${digits}`;
-  if (digits.length >= 11 && digits.length <= 15) return `+${digits}`;
-  return "";
-}
-
-/* ===========================
    VAPI TOOL CALLS (LIVE)
 =========================== */
 app.post("/tool-calls", async (req, res) => {
@@ -119,7 +416,7 @@ app.post("/tool-calls", async (req, res) => {
     const results = [];
 
     for (const tc of toolCalls) {
-      const toolCallId = tc.id || tc.toolCallId; // Vapi uses tc.id (OpenAI-style)
+      const toolCallId = tc.id || tc.toolCallId;
       const name = tc.function?.name;
       const args = normalizeArgs(tc.function?.arguments);
 
@@ -129,7 +426,6 @@ app.post("/tool-calls", async (req, res) => {
           result: {
             success: false,
             error: "Missing toolCallId or tool name in tool call payload",
-            receivedToolCall: tc,
           },
         });
         continue;
@@ -144,9 +440,6 @@ app.post("/tool-calls", async (req, res) => {
         JSON.stringify(args)
       );
 
-      /* ---------------------------
-         ghl_find_or_create_contact_webhook
-      --------------------------- */
       if (name === "ghl_find_or_create_contact_webhook") {
         const phoneRaw = (args.phone || "").toString();
         const email = (args.email || "").toString().trim().toLowerCase();
@@ -257,329 +550,38 @@ app.post("/tool-calls", async (req, res) => {
         continue;
       }
 
-      /* ---------------------------
-         ghl_check_cleaning_availability_webhook
-      --------------------------- */
       if (name === "ghl_check_cleaning_availability_webhook") {
-        const calendarId = "y53J9Fbsd5Xz0bwUiE4K";
-        const timezone = (args.timezone || "America/New_York").toString();
-        const date = (args.date || "").toString().trim(); // YYYY-MM-DD
-        const durationMinutes = 60;
-
-        const preferredTime =
-          args.preferredTime && typeof args.preferredTime === "object"
-            ? args.preferredTime
-            : null;
-
-        const logPrefix = `[ghl_check_cleaning_availability_webhook] toolCallId=${toolCallId}`;
-
-        const epochMsInTimeZone = (ymd, hh, mm, tz) => {
-          const utcGuessMs = Date.UTC(
-            Number(ymd.slice(0, 4)),
-            Number(ymd.slice(5, 7)) - 1,
-            Number(ymd.slice(8, 10)),
-            hh,
-            mm,
-            0
-          );
-
-          const parts = new Intl.DateTimeFormat("en-US", {
-            timeZone: tz,
-            hour12: false,
-            year: "numeric",
-            month: "2-digit",
-            day: "2-digit",
-            hour: "2-digit",
-            minute: "2-digit",
-            second: "2-digit",
-          }).formatToParts(new Date(utcGuessMs));
-
-          const gotY = Number(parts.find((p) => p.type === "year")?.value);
-          const gotM = Number(parts.find((p) => p.type === "month")?.value);
-          const gotD = Number(parts.find((p) => p.type === "day")?.value);
-          const gotH = Number(parts.find((p) => p.type === "hour")?.value);
-          const gotMin = Number(parts.find((p) => p.type === "minute")?.value);
-
-          const wantY = Number(ymd.slice(0, 4));
-          const wantM = Number(ymd.slice(5, 7));
-          const wantD = Number(ymd.slice(8, 10));
-
-          if (
-            [gotY, gotM, gotD, gotH, gotMin, wantY, wantM, wantD].some((x) =>
-              Number.isNaN(x)
-            )
-          ) {
-            return utcGuessMs;
-          }
-
-          const gotTotal =
-            (((gotY * 12 + gotM) * 31 + gotD) * 24 + gotH) * 60 + gotMin;
-          const wantTotal =
-            (((wantY * 12 + wantM) * 31 + wantD) * 24 + hh) * 60 + mm;
-
-          const deltaMinutes = gotTotal - wantTotal;
-          const correctedMs = utcGuessMs - deltaMinutes * 60 * 1000;
-
-          return correctedMs;
-        };
-
-        const safeGet = (obj, path) => {
-          try {
-            return path
-              .split(".")
-              .reduce((acc, k) => (acc ? acc[k] : undefined), obj);
-          } catch {
-            return undefined;
-          }
-        };
-
-        const collectCandidateArrays = (payload, ymd) => {
-          const candidates = [];
-          const pushIfArray = (x) => {
-            if (Array.isArray(x)) candidates.push(x);
-          };
-
-          pushIfArray(payload?.suggestedSlots);
-          pushIfArray(payload?.slots);
-
-          pushIfArray(payload?.data?.suggestedSlots);
-          pushIfArray(payload?.data?.slots);
-
-          pushIfArray(payload?.[ymd]);
-          pushIfArray(payload?.data?.[ymd]);
-
-          pushIfArray(payload?.freeSlots?.[ymd]);
-          pushIfArray(payload?.data?.freeSlots?.[ymd]);
-
-          pushIfArray(payload?.freeSlots?.slots);
-          pushIfArray(payload?.data?.freeSlots?.slots);
-
-          pushIfArray(safeGet(payload, "data.freeSlots.freeSlots"));
-          pushIfArray(safeGet(payload, "data.freeSlots.suggestedSlots"));
-          pushIfArray(safeGet(payload, "data.freeSlots.slots"));
-
-          if (!candidates.length) return [];
-          return candidates.sort((a, b) => b.length - a.length)[0] || [];
-        };
-
-        const toIso = (v) => {
-          if (v == null) return null;
-          if (typeof v === "string") return v;
-          if (typeof v === "number") {
-            const ms = v < 1e12 ? v * 1000 : v;
-            return new Date(ms).toISOString();
-          }
-          return null;
-        };
-
-        const addMinutesToIso = (iso, mins) => {
-          try {
-            const startMs = new Date(iso).getTime();
-            if (!Number.isFinite(startMs)) return null;
-            return new Date(startMs + mins * 60 * 1000).toISOString();
-          } catch {
-            return null;
-          }
-        };
-
-        const minutesFromMidnightInTz = (iso, tz) => {
-          try {
-            const d = new Date(iso);
-            const parts = new Intl.DateTimeFormat("en-US", {
-              timeZone: tz,
-              hour: "2-digit",
-              minute: "2-digit",
-              hour12: false,
-            }).formatToParts(d);
-
-            const hh = parseInt(parts.find((p) => p.type === "hour")?.value, 10);
-            const mm = parseInt(
-              parts.find((p) => p.type === "minute")?.value,
-              10
-            );
-            if (Number.isNaN(hh) || Number.isNaN(mm)) return null;
-            return hh * 60 + mm;
-          } catch {
-            return null;
-          }
-        };
-
         try {
-          if (!GHL_API_KEY || !GHL_LOCATION_ID) {
-            console.error(`${logPrefix} Missing env vars`, {
-              hasApiKey: !!GHL_API_KEY,
-              hasLocationId: !!GHL_LOCATION_ID,
-            });
-
-            results.push({
-              toolCallId,
-              result: {
-                success: false,
-                error:
-                  "Server misconfigured: missing GHL_API_KEY or GHL_LOCATION_ID",
-              },
-            });
-            continue;
-          }
-
-          if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
-            console.error(`${logPrefix} Invalid date format`, { date });
-            results.push({
-              toolCallId,
-              result: {
-                success: false,
-                error: "Invalid date format. Expected YYYY-MM-DD",
-                date,
-              },
-            });
-            continue;
-          }
-
-          const startDate = epochMsInTimeZone(date, 9, 0, "America/New_York");
-          const endDate = epochMsInTimeZone(date, 18, 0, "America/New_York");
-
-          const preferredMinutes =
-            preferredTime &&
-            Number.isFinite(Number(preferredTime.hour)) &&
-            Number.isFinite(Number(preferredTime.minute))
-              ? Number(preferredTime.hour) * 60 + Number(preferredTime.minute)
+          const timezone = (args.timezone || "America/New_York").toString();
+          const date = (args.date || "").toString().trim();
+          const preferredTime =
+            args.preferredTime && typeof args.preferredTime === "object"
+              ? args.preferredTime
               : null;
 
-          console.log(`${logPrefix} start/end (ms)`, {
-            startDate,
-            endDate,
-            startDateDigits: String(startDate).length,
-            endDateDigits: String(endDate).length,
-          });
-
-          console.log(`${logPrefix} Checking free slots`, {
-            calendarId,
+          const availability = await fetchCleaningAvailability({
             date,
             timezone,
-            startDate,
-            endDate,
             preferredTime,
-            preferredMinutes,
+            toolCallId,
           });
-
-          const resp = await axios.get(
-            `https://services.leadconnectorhq.com/calendars/${calendarId}/free-slots`,
-            {
-              headers: {
-                Authorization: `Bearer ${GHL_API_KEY}`,
-                Version: "2023-02-21",
-              },
-              params: {
-                startDate,
-                endDate,
-                timezone,
-              },
-            }
-          );
-
-          const payload = resp.data || {};
-          const rawSlots = collectCandidateArrays(payload, date);
-
-          console.log(`${logPrefix} Raw response keys`, {
-            topKeys: Object.keys(payload || {}),
-            rawSlotCount: Array.isArray(rawSlots) ? rawSlots.length : 0,
-            rawSlotSample: Array.isArray(rawSlots) ? rawSlots.slice(0, 3) : null,
-          });
-
-          const normalized = [];
-
-          for (const item of rawSlots) {
-            if (item == null) continue;
-
-            if (typeof item === "string" || typeof item === "number") {
-              const startIso = toIso(item);
-              if (!startIso) continue;
-
-              const endIso = addMinutesToIso(startIso, durationMinutes);
-              if (!endIso) continue;
-
-              normalized.push({ start: startIso, end: endIso });
-              continue;
-            }
-
-            if (typeof item === "object") {
-              const startIso =
-                toIso(item.start) ||
-                toIso(item.startTime) ||
-                toIso(item.startDate) ||
-                toIso(item.start_date);
-
-              const endIso =
-                toIso(item.end) ||
-                toIso(item.endTime) ||
-                toIso(item.endDate) ||
-                toIso(item.end_date);
-
-              if (startIso && !endIso) {
-                const derivedEnd = addMinutesToIso(startIso, durationMinutes);
-                if (derivedEnd) normalized.push({ start: startIso, end: derivedEnd });
-                continue;
-              }
-
-              if (startIso && endIso) {
-                normalized.push({ start: startIso, end: endIso });
-              }
-              continue;
-            }
-          }
-
-          console.log(`${logPrefix} Slots normalized`, {
-            normalizedCount: normalized.length,
-            sample: normalized.slice(0, 3),
-          });
-
-          if (!normalized.length) {
-            results.push({
-              toolCallId,
-              result: { success: true, date, timezone, slots: [] },
-            });
-            continue;
-          }
-
-          let picked = [];
-
-          if (preferredMinutes != null) {
-            const scored = normalized
-              .map((slot) => {
-                const slotMins = minutesFromMidnightInTz(slot.start, timezone);
-                const dist =
-                  slotMins == null
-                    ? Number.POSITIVE_INFINITY
-                    : Math.abs(slotMins - preferredMinutes);
-                return { slot, dist };
-              })
-              .sort((a, b) => a.dist - b.dist);
-
-            picked = scored.slice(0, 2).map((x) => x.slot);
-          } else {
-            picked = normalized.slice(0, 2);
-          }
 
           results.push({
             toolCallId,
-            result: {
-              success: true,
-              date,
-              timezone,
-              slots: picked.map((s) => ({ start: s.start, end: s.end })),
-            },
+            result: availability.finalResult,
           });
         } catch (error) {
-          const status = error.response?.status || null;
           const details = error.response?.data || error.message;
-          console.error(`${logPrefix} Error`, { status, details });
+          console.error(
+            `[ghl_check_cleaning_availability_webhook] toolCallId=${toolCallId} Error`,
+            details
+          );
 
           results.push({
             toolCallId,
             result: {
               success: false,
               error: "ghl_check_cleaning_availability_webhook failed",
-              status,
               details,
             },
           });
@@ -588,9 +590,6 @@ app.post("/tool-calls", async (req, res) => {
         continue;
       }
 
-      /* ---------------------------
-         Unknown tool
-      --------------------------- */
       results.push({
         toolCallId,
         result: { success: false, error: `Unknown tool: ${name}` },
@@ -611,6 +610,60 @@ app.post("/tool-calls", async (req, res) => {
         },
       ],
     });
+  }
+});
+
+/* ===========================
+   TEMP DEBUG ENDPOINT
+=========================== */
+app.get("/debug/free-slots", async (req, res) => {
+  try {
+    const timezone = (req.query.timezone || "America/New_York").toString();
+    const date = (req.query.date || "").toString().trim();
+
+    const hour =
+      req.query.hour !== undefined && req.query.hour !== ""
+        ? Number(req.query.hour)
+        : null;
+    const minute =
+      req.query.minute !== undefined && req.query.minute !== ""
+        ? Number(req.query.minute)
+        : null;
+
+    const preferredTime =
+      hour != null &&
+      minute != null &&
+      Number.isFinite(hour) &&
+      Number.isFinite(minute)
+        ? { hour: Number(hour), minute: Number(minute) }
+        : null;
+
+    const availability = await fetchCleaningAvailability({
+      date,
+      timezone,
+      preferredTime,
+      toolCallId: "debug-endpoint",
+    });
+
+    return res.status(200).json({
+      date,
+      timezone,
+      preferredTime,
+      startDate: availability.startDate,
+      endDate: availability.endDate,
+      rawPayload: availability.payload,
+      dateNode: availability.dateNode,
+      dateNodeType: availability.dateNodeType,
+      dateNodeIsArray: availability.dateNodeIsArray,
+      dateNodeKeys: availability.dateNodeKeys,
+      rawSlots: availability.rawSlots,
+      normalized: availability.normalized,
+      picked: availability.picked,
+      finalResult: availability.finalResult,
+    });
+  } catch (error) {
+    const details = error.response?.data || error.message;
+    return res.status(500).json({ error: "debug/free-slots failed", details });
   }
 });
 
