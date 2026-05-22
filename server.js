@@ -568,6 +568,149 @@ app.post("/tool-calls", async (req, res) => {
         continue;
       }
 
+      if (name === "ghl_create_cleaning_appointment_webhook") {
+        const contactId = String(args?.contactId || "").trim();
+        const startDateTime = String(args?.startDateTime || "").trim();
+        const calendarId = String(args?.calendarId || "").trim();
+        const timezone =
+          String(args?.timezone || "America/New_York").trim() ||
+          "America/New_York";
+
+        console.log("[booking] function.name:", name);
+        console.log("[booking] contactId:", contactId);
+        console.log("[booking] calendarId:", calendarId);
+        console.log("[booking] startDateTime:", startDateTime);
+
+        if (!contactId) {
+          results.push({
+            toolCallId,
+            result: {
+              success: false,
+              error: "Missing required argument: contactId",
+            },
+          });
+          continue;
+        }
+
+        if (!startDateTime) {
+          results.push({
+            toolCallId,
+            result: {
+              success: false,
+              error: "Missing required argument: startDateTime",
+            },
+          });
+          continue;
+        }
+
+        if (!calendarId) {
+          results.push({
+            toolCallId,
+            result: {
+              success: false,
+              error: "Missing required argument: calendarId",
+            },
+          });
+          continue;
+        }
+
+        const start = new Date(startDateTime);
+        if (Number.isNaN(start.getTime())) {
+          results.push({
+            toolCallId,
+            result: {
+              success: false,
+              error: "Invalid startDateTime (must be ISO datetime)",
+            },
+          });
+          continue;
+        }
+
+        const DURATION_MINUTES = 60;
+        const end = new Date(start.getTime() + DURATION_MINUTES * 60 * 1000);
+        const endTime = end.toISOString();
+
+        if (!GHL_API_KEY) {
+          results.push({
+            toolCallId,
+            result: {
+              success: false,
+              error: "Missing server env var: GHL_API_KEY",
+            },
+          });
+          continue;
+        }
+
+        const bodyPayload = {
+          calendarId,
+          contactId,
+          startTime: startDateTime,
+          endTime,
+          timezone,
+          ...(GHL_LOCATION_ID ? { locationId: GHL_LOCATION_ID } : {}),
+          title: "Cleaning",
+          appointmentStatus: "confirmed",
+        };
+
+        try {
+          const ghlResp = await axios.post(
+            "https://services.leadconnectorhq.com/calendars/events/appointments",
+            bodyPayload,
+            {
+              headers: {
+                Authorization: `Bearer ${GHL_API_KEY}`,
+                Version: "2023-02-21",
+                "Content-Type": "application/json",
+              },
+            }
+          );
+
+          console.log("[booking] ghlResp.status:", ghlResp.status);
+          console.log(
+            "[booking] responseText:",
+            JSON.stringify(ghlResp.data || {}, null, 2)
+          );
+
+          const responseJson = ghlResp.data || {};
+          const appointmentId =
+            responseJson?.id ||
+            responseJson?.appointment?.id ||
+            responseJson?.event?.id ||
+            responseJson?.data?.id ||
+            "";
+
+          results.push({
+            toolCallId,
+            result: {
+              success: true,
+              appointmentId,
+              calendarId,
+              startDateTime,
+              timezone,
+            },
+          });
+        } catch (error) {
+          const status = error.response?.status || 500;
+          const responseText =
+            typeof error.response?.data === "string"
+              ? error.response.data
+              : JSON.stringify(error.response?.data || error.message);
+
+          console.log("[booking] ghlResp.status:", status);
+          console.log("[booking] responseText:", responseText);
+
+          results.push({
+            toolCallId,
+            result: {
+              success: false,
+              error: `GHL ${status}: ${responseText}`,
+            },
+          });
+        }
+
+        continue;
+      }
+
       results.push({
         toolCallId,
         result: { success: false, error: `Unknown tool: ${name}` },
@@ -702,3 +845,4 @@ async function sendFollowUpSMS(phone) {
 app.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
 });
+
