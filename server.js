@@ -111,6 +111,24 @@ function normalizeArgs(maybeArgs) {
   return {};
 }
 
+const DOB_MMDDYYYY_REGEX = /^(0[1-9]|1[0-2])\/(0[1-9]|[12]\d|3[01])\/(19|20)\d\d$/;
+
+function isValidMMDDYYYY(s) {
+  if (typeof s !== "string" || !DOB_MMDDYYYY_REGEX.test(s)) return false;
+  const [mm, dd, yyyy] = s.split("/").map(Number);
+  const dt = new Date(Date.UTC(yyyy, mm - 1, dd));
+  return (
+    dt.getUTCFullYear() === yyyy &&
+    dt.getUTCMonth() === mm - 1 &&
+    dt.getUTCDate() === dd
+  );
+}
+
+function mmddyyyyToYyyyMmDd(s) {
+  const [mm, dd, yyyy] = s.split("/");
+  return `${yyyy}-${mm}-${dd}`;
+}
+
 function toE164(phoneRaw) {
   const digits = String(phoneRaw || "").replace(/[^\d]/g, "");
   if (digits.length === 10) return `+1${digits}`;
@@ -1238,6 +1256,153 @@ app.post("/tool-calls", async (req, res) => {
             result: {
               success: false,
               error: `GHL ${status}: ${responseText}`,
+            },
+          });
+        }
+
+        continue;
+      }
+
+      if (name === "ghl_update_contact_dob_webhook") {
+        const contactId = String(args?.contactId || "").trim();
+        const dateOfBirth = String(args?.dateOfBirth || "").trim();
+
+        if (!contactId) {
+          results.push({
+            toolCallId,
+            result: {
+              success: false,
+              error: "Missing required argument: contactId",
+            },
+          });
+          continue;
+        }
+
+        if (!dateOfBirth) {
+          results.push({
+            toolCallId,
+            result: {
+              success: false,
+              error: "Missing required argument: dateOfBirth",
+            },
+          });
+          continue;
+        }
+
+        if (!isValidMMDDYYYY(dateOfBirth)) {
+          results.push({
+            toolCallId,
+            result: {
+              success: false,
+              contactId,
+              error: "Invalid dateOfBirth format. Expected MM/DD/YYYY",
+            },
+          });
+          continue;
+        }
+
+        if (!GHL_API_KEY) {
+          results.push({
+            toolCallId,
+            result: {
+              success: false,
+              error: "Missing server env var: GHL_API_KEY",
+            },
+          });
+          continue;
+        }
+
+        const targetDob = mmddyyyyToYyyyMmDd(dateOfBirth);
+
+        try {
+          const getResp = await axios.get(
+            `https://services.leadconnectorhq.com/contacts/${contactId}`,
+            {
+              headers: {
+                Authorization: `Bearer ${GHL_API_KEY}`,
+                Version: "2023-02-21",
+              },
+            }
+          );
+
+          const existingContact =
+            getResp.data?.contact ||
+            getResp.data?.data?.contact ||
+            getResp.data?.data ||
+            getResp.data ||
+            {};
+
+          const existingDobRaw = existingContact?.dateOfBirth || "";
+          const existingDob =
+            typeof existingDobRaw === "string" && existingDobRaw.length >= 10
+              ? existingDobRaw.slice(0, 10)
+              : "";
+
+          if (existingDob === targetDob) {
+            results.push({
+              toolCallId,
+              result: {
+                success: true,
+                contactId,
+                inputDateOfBirth: dateOfBirth,
+                storedDateOfBirth: existingDob,
+                noOp: true,
+              },
+            });
+            continue;
+          }
+
+          const updateResp = await axios.put(
+            `https://services.leadconnectorhq.com/contacts/${contactId}`,
+            {
+              dateOfBirth: targetDob,
+            },
+            {
+              headers: {
+                Authorization: `Bearer ${GHL_API_KEY}`,
+                Version: "2023-02-21",
+                "Content-Type": "application/json",
+              },
+            }
+          );
+
+          const updatedContact =
+            updateResp.data?.contact ||
+            updateResp.data?.data?.contact ||
+            updateResp.data?.data ||
+            updateResp.data ||
+            {};
+
+          const storedDobRaw = updatedContact?.dateOfBirth || targetDob;
+          const storedDateOfBirth =
+            typeof storedDobRaw === "string" && storedDobRaw.length >= 10
+              ? storedDobRaw.slice(0, 10)
+              : targetDob;
+
+          results.push({
+            toolCallId,
+            result: {
+              success: true,
+              contactId,
+              inputDateOfBirth: dateOfBirth,
+              storedDateOfBirth,
+              noOp: false,
+            },
+          });
+        } catch (error) {
+          const details = error.response?.data || error.message;
+          console.error(
+            `[ghl_update_contact_dob_webhook] toolCallId=${toolCallId} Error`,
+            details
+          );
+
+          results.push({
+            toolCallId,
+            result: {
+              success: false,
+              contactId,
+              error: "ghl_update_contact_dob_webhook failed",
+              details,
             },
           });
         }
