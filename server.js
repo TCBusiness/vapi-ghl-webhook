@@ -26,64 +26,64 @@ const GHL_LOCATION_ID = process.env.GHL_LOCATION_ID;
 =========================== */
 const SERVICE_CONFIG = {
   cleaning: {
-    calendarId: "y53J9Fbsd5Xz0bwUiE4K",
+    calendarId: "xxu2BJu9id2CZNCHVznf",
     title: "Cleaning",
     durationMinutes: 60,
   },
+  whitening: {
+    calendarId: "1V3YhiECFKwKjhyAYNyG",
+    title: "Whitening",
+    durationMinutes: 90,
+  },
+  implants: {
+    calendarId: "1V3YhiECFKwKjhyAYNyG",
+    title: "Implants",
+    durationMinutes: 120,
+  },
+  crown: {
+    calendarId: "1V3YhiECFKwKjhyAYNyG",
+    title: "Crown",
+    durationMinutes: 120,
+  },
+  veneer: {
+    calendarId: "1V3YhiECFKwKjhyAYNyG",
+    title: "Veneer",
+    durationMinutes: 120,
+  },
+  extractions: {
+    calendarId: "1V3YhiECFKwKjhyAYNyG",
+    title: "Extractions",
+    durationMinutes: 120,
+  },
   emergency: {
-    calendarId: "6oQOS7mMM250J45ANCY3",
+    calendarId: "1V3YhiECFKwKjhyAYNyG",
     title: "Emergency",
     durationMinutes: 60,
   },
   mouthguard: {
-    calendarId: "RCCSxichVPDw9fmho5jw",
+    calendarId: "1V3YhiECFKwKjhyAYNyG",
     title: "Mouthguard",
     durationMinutes: 60,
   },
-  extractions: {
-    calendarId: "gNdTmIQBW5ezLlnyXJWi",
-    title: "Extractions",
-    durationMinutes: 120,
-  },
-  root_canal: {
-    calendarId: "pnZ54Hhpd852MLVYk5M3",
-    title: "Root Canal",
-    durationMinutes: 120,
-  },
-  bridge: {
-    calendarId: "uPVyY43B68WeiNWjoKz0",
-    title: "Bridge",
-    durationMinutes: 120,
-  },
-  veneer: {
-    calendarId: "fnTUC2Av9vs14pxyPdEn",
-    title: "Veneer",
-    durationMinutes: 120,
-  },
-  crown: {
-    calendarId: "714t7E54oseEPIcxNg7t",
-    title: "Crown",
-    durationMinutes: 120,
-  },
-  implants: {
-    calendarId: "pe81t8ECctXOmZfUevtO",
-    title: "Implants",
-    durationMinutes: 120,
+  denture: {
+    calendarId: "1V3YhiECFKwKjhyAYNyG",
+    title: "Denture",
+    durationMinutes: 60,
   },
   composite: {
-    calendarId: "rZLLX2apRd16aKc7wDdf",
+    calendarId: "1V3YhiECFKwKjhyAYNyG",
     title: "Composite",
     durationMinutes: 60,
   },
-  whitening: {
-    calendarId: "AxV74yChkWhIoSAdpGd0",
-    title: "Whitening",
-    durationMinutes: 90,
+  bridge: {
+    calendarId: "1V3YhiECFKwKjhyAYNyG",
+    title: "Bridge",
+    durationMinutes: 120,
   },
-  denture: {
-    calendarId: "BL7a1dqxx29t28B5GiPW",
-    title: "Denture",
-    durationMinutes: 60,
+  root_canal: {
+    calendarId: "1V3YhiECFKwKjhyAYNyG",
+    title: "Root Canal",
+    durationMinutes: 120,
   },
 };
 
@@ -317,7 +317,7 @@ async function fetchCleaningAvailability({
   preferredTime,
   toolCallId = "debug",
 }) {
-  const calendarId = "y53J9Fbsd5Xz0bwUiE4K";
+  const calendarId = SERVICE_CONFIG.cleaning.calendarId;
   const logPrefix = `[ghl_check_cleaning_availability_webhook] toolCallId=${toolCallId}`;
 
   if (!GHL_API_KEY || !GHL_LOCATION_ID) {
@@ -1074,6 +1074,8 @@ app.post("/tool-calls", async (req, res) => {
               appointmentId,
               calendarId: cfg.calendarId,
               startDateTime,
+              endDateTime: endTime,
+              durationMinutes: DURATION_MINUTES,
               timezone,
               serviceType,
             },
