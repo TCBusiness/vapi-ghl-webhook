@@ -183,6 +183,7 @@ function invalidDateFinalResult({ date, timezone, serviceType }) {
     timezone: timezone || "America/New_York",
     slots: [],
   };
+
   return serviceType ? { ...base, serviceType } : base;
 }
 
@@ -196,6 +197,7 @@ function dateInPastFinalResult({ date, timezone, serviceType }) {
     timezone: timezone || "America/New_York",
     slots: [],
   };
+
   return serviceType ? { ...base, serviceType } : base;
 }
 
@@ -242,7 +244,6 @@ function epochMsInTimeZone(ymd, hh, mm, tz) {
     (((gotY * 12 + gotM) * 31 + gotD) * 24 + gotH) * 60 + gotMin;
   const wantTotal =
     (((wantY * 12 + wantM) * 31 + wantD) * 24 + hh) * 60 + mm;
-
   const deltaMinutes = gotTotal - wantTotal;
   const correctedMs = utcGuessMs - deltaMinutes * 60 * 1000;
 
@@ -274,6 +275,7 @@ function collectCandidateArrays(payload, ymd) {
   pushIfArray(payload?.slots);
   pushIfArray(payload?.data?.suggestedSlots);
   pushIfArray(payload?.data?.slots);
+
   pushIfArray(payload?.[ymd]);
   pushIfArray(payload?.[ymd]?.slots);
   pushIfArray(payload?.[ymd]?.freeSlots);
@@ -282,11 +284,13 @@ function collectCandidateArrays(payload, ymd) {
   pushIfArray(payload?.[ymd]?.data?.freeSlots);
   pushIfArray(payload?.[ymd]?.data?.suggestedSlots);
   pushObjectValueArrays(payload?.[ymd]);
+
   pushIfArray(payload?.data?.[ymd]);
   pushIfArray(payload?.freeSlots?.[ymd]);
   pushIfArray(payload?.data?.freeSlots?.[ymd]);
   pushIfArray(payload?.freeSlots?.slots);
   pushIfArray(payload?.data?.freeSlots?.slots);
+
   pushIfArray(safeGet(payload, "data.freeSlots.freeSlots"));
   pushIfArray(safeGet(payload, "data.freeSlots.suggestedSlots"));
   pushIfArray(safeGet(payload, "data.freeSlots.slots"));
@@ -324,9 +328,6 @@ function minutesFromMidnightInTz(iso, tz) {
   }
 }
 
-/* ===========================
-   AVAILABILITY - CLEANING (v2 con filtro de duración)
-=========================== */
 async function fetchCleaningAvailability({
   date,
   timezone,
@@ -334,7 +335,6 @@ async function fetchCleaningAvailability({
   toolCallId = "debug",
 }) {
   const calendarId = SERVICE_CONFIG.cleaning.calendarId;
-  const durationMin = SERVICE_CONFIG.cleaning.durationMinutes;
   const logPrefix = `[ghl_check_cleaning_availability_webhook] toolCallId=${toolCallId}`;
 
   if (!GHL_API_KEY || !GHL_LOCATION_ID) {
@@ -344,15 +344,27 @@ async function fetchCleaningAvailability({
   if (!isValidYYYYMMDD(date)) {
     console.log(`${logPrefix} rejected invalid date`, { date, timezone });
     return {
-      finalResult: invalidDateFinalResult({ date, timezone, serviceType: "cleaning" }),
+      finalResult: invalidDateFinalResult({
+        date,
+        timezone,
+        serviceType: "cleaning",
+      }),
     };
   }
 
   const todayYMD = ymdInTimeZone("America/New_York");
   if (compareYYYYMMDD(date, todayYMD) < 0) {
-    console.log(`${logPrefix} rejected past date`, { date, todayYMD, timezone });
+    console.log(`${logPrefix} rejected past date`, {
+      date,
+      todayYMD,
+      timezone,
+    });
     return {
-      finalResult: dateInPastFinalResult({ date, timezone, serviceType: "cleaning" }),
+      finalResult: dateInPastFinalResult({
+        date,
+        timezone,
+        serviceType: "cleaning",
+      }),
     };
   }
 
@@ -374,7 +386,13 @@ async function fetchCleaningAvailability({
   });
 
   console.log(`${logPrefix} Checking free slots`, {
-    calendarId, date, timezone, startDate, endDate, preferredTime, preferredMinutes,
+    calendarId,
+    date,
+    timezone,
+    startDate,
+    endDate,
+    preferredTime,
+    preferredMinutes,
   });
 
   const resp = await axios.get(
@@ -384,7 +402,11 @@ async function fetchCleaningAvailability({
         Authorization: `Bearer ${GHL_API_KEY}`,
         Version: "2023-02-21",
       },
-      params: { startDate, endDate, timezone },
+      params: {
+        startDate,
+        endDate,
+        timezone,
+      },
     }
   );
 
@@ -398,59 +420,74 @@ async function fetchCleaningAvailability({
   });
 
   const dateNode = payload?.[date];
+  const dateNodeType = typeof dateNode;
+  const dateNodeIsArray = Array.isArray(dateNode);
+  const dateNodeKeys =
+    dateNode && typeof dateNode === "object" && !Array.isArray(dateNode)
+      ? Object.keys(dateNode)
+      : [];
 
-  // Normalizar a { startMs, startIso }
-  const normalized = [];
-  for (const item of rawSlots) {
-    if (item == null) continue;
-    const startIso =
-      typeof item === "string" || typeof item === "number"
-        ? toIso(item)
-        : toIso(item.start) || toIso(item.startTime) || toIso(item.startDate) || toIso(item.start_date);
-    if (!startIso) continue;
-    const startMs = new Date(startIso).getTime();
-    if (!Number.isNaN(startMs)) normalized.push({ startMs, startIso });
+  console.log(`${logPrefix} DEBUG payload`, payload);
+  console.log(`${logPrefix} DEBUG payload[date]`, dateNode);
+  console.log(`${logPrefix} DEBUG typeof payload[date]`, dateNodeType);
+  console.log(`${logPrefix} DEBUG Array.isArray(payload[date])`, dateNodeIsArray);
+  if (dateNode && typeof dateNode === "object" && !Array.isArray(dateNode)) {
+    console.log(`${logPrefix} DEBUG Object.keys(payload[date])`, dateNodeKeys);
   }
 
-  // Filtrar slots que tienen espacio completo para la duración del servicio
-  const freeMs = new Set(normalized.map((s) => s.startMs));
-  const slotIntervalMs = 5 * 60 * 1000;
-  const durationMs = durationMin * 60 * 1000;
-  const stepsNeeded = Math.ceil(durationMs / slotIntervalMs);
-  const closeMs = epochMsInTimeZone(date, 18, 0, "America/New_York");
+  const normalized = [];
 
-  const valid = normalized.filter(({ startMs }) => {
-    for (let i = 0; i < stepsNeeded - 1; i++) {
-      if (!freeMs.has(startMs + i * slotIntervalMs)) return false;
+  for (const item of rawSlots) {
+    if (item == null) continue;
+
+    if (typeof item === "string" || typeof item === "number") {
+      const startIso = toIso(item);
+      if (!startIso) continue;
+      normalized.push({ start: startIso });
+      continue;
     }
-    return startMs + durationMs <= closeMs;
+
+    if (typeof item === "object") {
+      const startIso =
+        toIso(item.start) ||
+        toIso(item.startTime) ||
+        toIso(item.startDate) ||
+        toIso(item.start_date);
+
+      if (startIso) {
+        normalized.push({ start: startIso });
+      }
+    }
+  }
+
+  console.log(`${logPrefix} Slots normalized`, {
+    normalizedCount: normalized.length,
+    sample: normalized.slice(0, 3),
   });
 
-  console.log(`${logPrefix} Slots after duration filter`, {
-    raw: normalized.length,
-    valid: valid.length,
-    sample: valid.slice(0, 3).map((s) => s.startIso),
-  });
-
-  let picked;
+  let picked = [];
   if (preferredMinutes != null) {
-    picked = [...valid]
-      .sort((a, b) => {
-        const aMin = minutesFromMidnightInTz(a.startIso, timezone) ?? Infinity;
-        const bMin = minutesFromMidnightInTz(b.startIso, timezone) ?? Infinity;
-        return Math.abs(aMin - preferredMinutes) - Math.abs(bMin - preferredMinutes);
+    const scored = normalized
+      .map((slot) => {
+        const slotMins = minutesFromMidnightInTz(slot.start, timezone);
+        const dist =
+          slotMins == null
+            ? Number.POSITIVE_INFINITY
+            : Math.abs(slotMins - preferredMinutes);
+        return { slot, dist };
       })
-      .slice(0, 2);
+      .sort((a, b) => a.dist - b.dist);
+
+    picked = scored.slice(0, 2).map((x) => x.slot);
   } else {
-    picked = valid.slice(0, 2);
+    picked = normalized.slice(0, 2);
   }
 
   const finalResult = {
     success: true,
     date,
     timezone,
-    serviceType: "cleaning",
-    slots: picked.map((s) => ({ start: s.startIso })),
+    slots: picked.map((s) => ({ start: s.start })),
   };
 
   return {
@@ -458,19 +495,16 @@ async function fetchCleaningAvailability({
     endDate,
     payload,
     dateNode,
-    dateNodeType: typeof dateNode,
-    dateNodeIsArray: Array.isArray(dateNode),
-    dateNodeKeys: dateNode && typeof dateNode === "object" && !Array.isArray(dateNode) ? Object.keys(dateNode) : [],
+    dateNodeType,
+    dateNodeIsArray,
+    dateNodeKeys,
     rawSlots,
-    normalized: normalized.map((s) => ({ start: s.startIso })),
-    picked: picked.map((s) => ({ start: s.startIso })),
+    normalized,
+    picked,
     finalResult,
   };
 }
 
-/* ===========================
-   AVAILABILITY - SERVICIOS (v2 con filtro de duración)
-=========================== */
 async function fetchServiceAvailability({
   serviceType,
   date,
@@ -479,10 +513,11 @@ async function fetchServiceAvailability({
   toolCallId = "debug",
 }) {
   const cfg = SERVICE_CONFIG[serviceType];
-  if (!cfg) throw new Error(`Unknown serviceType: ${serviceType}`);
+  if (!cfg) {
+    throw new Error(`Unknown serviceType: ${serviceType}`);
+  }
 
   const calendarId = cfg.calendarId;
-  const durationMin = cfg.durationMinutes;
   const logPrefix = `[ghl_check_availability_webhook] serviceType=${serviceType} toolCallId=${toolCallId}`;
 
   if (!GHL_API_KEY || !GHL_LOCATION_ID) {
@@ -492,15 +527,28 @@ async function fetchServiceAvailability({
   if (!isValidYYYYMMDD(date)) {
     console.log(`${logPrefix} rejected invalid date`, { date, timezone, serviceType });
     return {
-      finalResult: invalidDateFinalResult({ date, timezone, serviceType }),
+      finalResult: invalidDateFinalResult({
+        date,
+        timezone,
+        serviceType,
+      }),
     };
   }
 
   const todayYMD = ymdInTimeZone("America/New_York");
   if (compareYYYYMMDD(date, todayYMD) < 0) {
-    console.log(`${logPrefix} rejected past date`, { date, todayYMD, timezone, serviceType });
+    console.log(`${logPrefix} rejected past date`, {
+      date,
+      todayYMD,
+      timezone,
+      serviceType,
+    });
     return {
-      finalResult: dateInPastFinalResult({ date, timezone, serviceType }),
+      finalResult: dateInPastFinalResult({
+        date,
+        timezone,
+        serviceType,
+      }),
     };
   }
 
@@ -522,8 +570,14 @@ async function fetchServiceAvailability({
   });
 
   console.log(`${logPrefix} Checking free slots`, {
-    calendarId, date, timezone, startDate, endDate,
-    preferredTime, preferredMinutes, durationMinutes: durationMin,
+    calendarId,
+    date,
+    timezone,
+    startDate,
+    endDate,
+    preferredTime,
+    preferredMinutes,
+    durationMinutes: cfg.durationMinutes,
   });
 
   const resp = await axios.get(
@@ -533,7 +587,11 @@ async function fetchServiceAvailability({
         Authorization: `Bearer ${GHL_API_KEY}`,
         Version: "2023-02-21",
       },
-      params: { startDate, endDate, timezone },
+      params: {
+        startDate,
+        endDate,
+        timezone,
+      },
     }
   );
 
@@ -547,51 +605,67 @@ async function fetchServiceAvailability({
   });
 
   const dateNode = payload?.[date];
+  const dateNodeType = typeof dateNode;
+  const dateNodeIsArray = Array.isArray(dateNode);
+  const dateNodeKeys =
+    dateNode && typeof dateNode === "object" && !Array.isArray(dateNode)
+      ? Object.keys(dateNode)
+      : [];
 
-  // Normalizar a { startMs, startIso }
-  const normalized = [];
-  for (const item of rawSlots) {
-    if (item == null) continue;
-    const startIso =
-      typeof item === "string" || typeof item === "number"
-        ? toIso(item)
-        : toIso(item.start) || toIso(item.startTime) || toIso(item.startDate) || toIso(item.start_date);
-    if (!startIso) continue;
-    const startMs = new Date(startIso).getTime();
-    if (!Number.isNaN(startMs)) normalized.push({ startMs, startIso });
+  console.log(`${logPrefix} DEBUG payload`, payload);
+  console.log(`${logPrefix} DEBUG payload[date]`, dateNode);
+  console.log(`${logPrefix} DEBUG typeof payload[date]`, dateNodeType);
+  console.log(`${logPrefix} DEBUG Array.isArray(payload[date])`, dateNodeIsArray);
+  if (dateNode && typeof dateNode === "object" && !Array.isArray(dateNode)) {
+    console.log(`${logPrefix} DEBUG Object.keys(payload[date])`, dateNodeKeys);
   }
 
-  // Filtrar por duración completa
-  const freeMs = new Set(normalized.map((s) => s.startMs));
-  const slotIntervalMs = 5 * 60 * 1000;
-  const durationMs = durationMin * 60 * 1000;
-  const stepsNeeded = Math.ceil(durationMs / slotIntervalMs);
-  const closeMs = epochMsInTimeZone(date, 18, 0, "America/New_York");
+  const normalized = [];
 
-  const valid = normalized.filter(({ startMs }) => {
-    for (let i = 0; i < stepsNeeded - 1; i++) {
-      if (!freeMs.has(startMs + i * slotIntervalMs)) return false;
+  for (const item of rawSlots) {
+    if (item == null) continue;
+
+    if (typeof item === "string" || typeof item === "number") {
+      const startIso = toIso(item);
+      if (!startIso) continue;
+      normalized.push({ start: startIso });
+      continue;
     }
-    return startMs + durationMs <= closeMs;
+
+    if (typeof item === "object") {
+      const startIso =
+        toIso(item.start) ||
+        toIso(item.startTime) ||
+        toIso(item.startDate) ||
+        toIso(item.start_date);
+
+      if (startIso) {
+        normalized.push({ start: startIso });
+      }
+    }
+  }
+
+  console.log(`${logPrefix} Slots normalized`, {
+    normalizedCount: normalized.length,
+    sample: normalized.slice(0, 3),
   });
 
-  console.log(`${logPrefix} Slots after duration filter`, {
-    raw: normalized.length,
-    valid: valid.length,
-    sample: valid.slice(0, 3).map((s) => s.startIso),
-  });
-
-  let picked;
+  let picked = [];
   if (preferredMinutes != null) {
-    picked = [...valid]
-      .sort((a, b) => {
-        const aMin = minutesFromMidnightInTz(a.startIso, timezone) ?? Infinity;
-        const bMin = minutesFromMidnightInTz(b.startIso, timezone) ?? Infinity;
-        return Math.abs(aMin - preferredMinutes) - Math.abs(bMin - preferredMinutes);
+    const scored = normalized
+      .map((slot) => {
+        const slotMins = minutesFromMidnightInTz(slot.start, timezone);
+        const dist =
+          slotMins == null
+            ? Number.POSITIVE_INFINITY
+            : Math.abs(slotMins - preferredMinutes);
+        return { slot, dist };
       })
-      .slice(0, 2);
+      .sort((a, b) => a.dist - b.dist);
+
+    picked = scored.slice(0, 2).map((x) => x.slot);
   } else {
-    picked = valid.slice(0, 2);
+    picked = normalized.slice(0, 2);
   }
 
   const finalResult = {
@@ -599,7 +673,7 @@ async function fetchServiceAvailability({
     serviceType,
     date,
     timezone,
-    slots: picked.map((s) => ({ start: s.startIso })),
+    slots: picked.map((s) => ({ start: s.start })),
   };
 
   return {
@@ -607,12 +681,12 @@ async function fetchServiceAvailability({
     endDate,
     payload,
     dateNode,
-    dateNodeType: typeof dateNode,
-    dateNodeIsArray: Array.isArray(dateNode),
-    dateNodeKeys: dateNode && typeof dateNode === "object" && !Array.isArray(dateNode) ? Object.keys(dateNode) : [],
+    dateNodeType,
+    dateNodeIsArray,
+    dateNodeKeys,
     rawSlots,
-    normalized: normalized.map((s) => ({ start: s.startIso })),
-    picked: picked.map((s) => ({ start: s.startIso })),
+    normalized,
+    picked,
     finalResult,
   };
 }
@@ -626,6 +700,7 @@ app.post("/vapi-webhook", async (req, res) => {
 
   try {
     const body = req.body;
+
     console.log("📦 Payload:", JSON.stringify(body, null, 2));
 
     const phone =
@@ -791,6 +866,7 @@ app.post("/tool-calls", async (req, res) => {
         } catch (error) {
           const details = error.response?.data || error.message;
           console.error(`${logPrefix} Error`, details);
+
           results.push({
             toolCallId,
             result: {
@@ -831,6 +907,7 @@ app.post("/tool-calls", async (req, res) => {
             `[ghl_check_cleaning_availability_webhook] toolCallId=${toolCallId} Error`,
             details
           );
+
           results.push({
             toolCallId,
             result: {
@@ -888,6 +965,7 @@ app.post("/tool-calls", async (req, res) => {
             `[ghl_check_availability_webhook] toolCallId=${toolCallId} Error`,
             details
           );
+
           results.push({
             toolCallId,
             result: {
@@ -1046,24 +1124,56 @@ app.post("/tool-calls", async (req, res) => {
         const startDateTime = String(args?.startDateTime || "").trim();
         const calendarId = String(args?.calendarId || "").trim();
         const timezone =
-          String(args?.timezone || "America/New_York").trim() || "America/New_York";
+          String(args?.timezone || "America/New_York").trim() ||
+          "America/New_York";
+
+        console.log("[booking] function.name:", name);
+        console.log("[booking] contactId:", contactId);
+        console.log("[booking] calendarId:", calendarId);
+        console.log("[booking] startDateTime:", startDateTime);
 
         if (!contactId) {
-          results.push({ toolCallId, result: { success: false, error: "Missing required argument: contactId" } });
+          results.push({
+            toolCallId,
+            result: {
+              success: false,
+              error: "Missing required argument: contactId",
+            },
+          });
           continue;
         }
+
         if (!startDateTime) {
-          results.push({ toolCallId, result: { success: false, error: "Missing required argument: startDateTime" } });
+          results.push({
+            toolCallId,
+            result: {
+              success: false,
+              error: "Missing required argument: startDateTime",
+            },
+          });
           continue;
         }
+
         if (!calendarId) {
-          results.push({ toolCallId, result: { success: false, error: "Missing required argument: calendarId" } });
+          results.push({
+            toolCallId,
+            result: {
+              success: false,
+              error: "Missing required argument: calendarId",
+            },
+          });
           continue;
         }
 
         const start = new Date(startDateTime);
         if (Number.isNaN(start.getTime())) {
-          results.push({ toolCallId, result: { success: false, error: "Invalid startDateTime (must be ISO datetime)" } });
+          results.push({
+            toolCallId,
+            result: {
+              success: false,
+              error: "Invalid startDateTime (must be ISO datetime)",
+            },
+          });
           continue;
         }
 
@@ -1072,7 +1182,13 @@ app.post("/tool-calls", async (req, res) => {
         const endTime = end.toISOString();
 
         if (!GHL_API_KEY) {
-          results.push({ toolCallId, result: { success: false, error: "Missing server env var: GHL_API_KEY" } });
+          results.push({
+            toolCallId,
+            result: {
+              success: false,
+              error: "Missing server env var: GHL_API_KEY",
+            },
+          });
           continue;
         }
 
@@ -1100,6 +1216,12 @@ app.post("/tool-calls", async (req, res) => {
             }
           );
 
+          console.log("[booking] ghlResp.status:", ghlResp.status);
+          console.log(
+            "[booking] responseText:",
+            JSON.stringify(ghlResp.data || {}, null, 2)
+          );
+
           const responseJson = ghlResp.data || {};
           const appointmentId =
             responseJson?.id ||
@@ -1110,7 +1232,13 @@ app.post("/tool-calls", async (req, res) => {
 
           results.push({
             toolCallId,
-            result: { success: true, appointmentId, calendarId, startDateTime, timezone },
+            result: {
+              success: true,
+              appointmentId,
+              calendarId,
+              startDateTime,
+              timezone,
+            },
           });
         } catch (error) {
           const status = error.response?.status || 500;
@@ -1119,9 +1247,15 @@ app.post("/tool-calls", async (req, res) => {
               ? error.response.data
               : JSON.stringify(error.response?.data || error.message);
 
+          console.log("[booking] ghlResp.status:", status);
+          console.log("[booking] responseText:", responseText);
+
           results.push({
             toolCallId,
-            result: { success: false, error: `GHL ${status}: ${responseText}` },
+            result: {
+              success: false,
+              error: `GHL ${status}: ${responseText}`,
+            },
           });
         }
 
@@ -1133,19 +1267,47 @@ app.post("/tool-calls", async (req, res) => {
         const dateOfBirth = String(args?.dateOfBirth || "").trim();
 
         if (!contactId) {
-          results.push({ toolCallId, result: { success: false, error: "Missing required argument: contactId" } });
+          results.push({
+            toolCallId,
+            result: {
+              success: false,
+              error: "Missing required argument: contactId",
+            },
+          });
           continue;
         }
+
         if (!dateOfBirth) {
-          results.push({ toolCallId, result: { success: false, error: "Missing required argument: dateOfBirth" } });
+          results.push({
+            toolCallId,
+            result: {
+              success: false,
+              error: "Missing required argument: dateOfBirth",
+            },
+          });
           continue;
         }
+
         if (!isValidMMDDYYYY(dateOfBirth)) {
-          results.push({ toolCallId, result: { success: false, contactId, error: "Invalid dateOfBirth format. Expected MM/DD/YYYY" } });
+          results.push({
+            toolCallId,
+            result: {
+              success: false,
+              contactId,
+              error: "Invalid dateOfBirth format. Expected MM/DD/YYYY",
+            },
+          });
           continue;
         }
+
         if (!GHL_API_KEY) {
-          results.push({ toolCallId, result: { success: false, error: "Missing server env var: GHL_API_KEY" } });
+          results.push({
+            toolCallId,
+            result: {
+              success: false,
+              error: "Missing server env var: GHL_API_KEY",
+            },
+          });
           continue;
         }
 
@@ -1178,14 +1340,22 @@ app.post("/tool-calls", async (req, res) => {
           if (existingDob === targetDob) {
             results.push({
               toolCallId,
-              result: { success: true, contactId, inputDateOfBirth: dateOfBirth, storedDateOfBirth: existingDob, noOp: true },
+              result: {
+                success: true,
+                contactId,
+                inputDateOfBirth: dateOfBirth,
+                storedDateOfBirth: existingDob,
+                noOp: true,
+              },
             });
             continue;
           }
 
           const updateResp = await axios.put(
             `https://services.leadconnectorhq.com/contacts/${contactId}`,
-            { dateOfBirth: targetDob },
+            {
+              dateOfBirth: targetDob,
+            },
             {
               headers: {
                 Authorization: `Bearer ${GHL_API_KEY}`,
@@ -1210,14 +1380,29 @@ app.post("/tool-calls", async (req, res) => {
 
           results.push({
             toolCallId,
-            result: { success: true, contactId, inputDateOfBirth: dateOfBirth, storedDateOfBirth, noOp: false },
+            result: {
+              success: true,
+              contactId,
+              inputDateOfBirth: dateOfBirth,
+              storedDateOfBirth,
+              noOp: false,
+            },
           });
         } catch (error) {
           const details = error.response?.data || error.message;
-          console.error(`[ghl_update_contact_dob_webhook] toolCallId=${toolCallId} Error`, details);
+          console.error(
+            `[ghl_update_contact_dob_webhook] toolCallId=${toolCallId} Error`,
+            details
+          );
+
           results.push({
             toolCallId,
-            result: { success: false, contactId, error: "ghl_update_contact_dob_webhook failed", details },
+            result: {
+              success: false,
+              contactId,
+              error: "ghl_update_contact_dob_webhook failed",
+              details,
+            },
           });
         }
 
@@ -1265,7 +1450,10 @@ app.get("/debug/free-slots", async (req, res) => {
         : null;
 
     const preferredTime =
-      hour != null && minute != null && Number.isFinite(hour) && Number.isFinite(minute)
+      hour != null &&
+      minute != null &&
+      Number.isFinite(hour) &&
+      Number.isFinite(minute)
         ? { hour: Number(hour), minute: Number(minute) }
         : null;
 
