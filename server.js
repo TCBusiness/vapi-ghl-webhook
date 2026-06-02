@@ -245,7 +245,7 @@ function minutesFromMidnightInTz(iso, tz) {
    Si hay preferredTime, el slot más cercano va primero.
 =========================== */
 function pickMorningAndAfternoon(normalized, preferredMinutes, timezone) {
-  const NOON = 12 * 60; // 720 minutos
+  const NOON = 14 * 60; // 840 minutos — corte a las 2pm para separar mañana y tarde
 
   const withMins = normalized.map((slot) => ({
     slot,
