@@ -237,6 +237,64 @@ function minutesFromMidnightInTz(iso, tz) {
   } catch { return null; }
 }
 
+/* ===========================
+   SLOT PICKER — mañana y tarde
+   Devuelve máximo 2 slots:
+   1 antes de las 12pm y 1 desde las 12pm.
+   Si solo hay en un bloque, devuelve el mejor disponible.
+   Si hay preferredTime, el slot más cercano va primero.
+=========================== */
+function pickMorningAndAfternoon(normalized, preferredMinutes, timezone) {
+  const NOON = 12 * 60; // 720 minutos
+
+  const withMins = normalized.map((slot) => ({
+    slot,
+    mins: minutesFromMidnightInTz(slot.start, timezone) ?? Infinity,
+  }));
+
+  const morning = withMins.filter((s) => s.mins < NOON);
+  const afternoon = withMins.filter((s) => s.mins >= NOON);
+
+  let slot1 = null;
+  let slot2 = null;
+
+  if (preferredMinutes != null) {
+    // Slot más cercano a la preferencia en cada bloque
+    const bestMorning = morning.sort((a, b) => Math.abs(a.mins - preferredMinutes) - Math.abs(b.mins - preferredMinutes))[0];
+    const bestAfternoon = afternoon.sort((a, b) => Math.abs(a.mins - preferredMinutes) - Math.abs(b.mins - preferredMinutes))[0];
+
+    if (bestMorning && bestAfternoon) {
+      // El más cercano a la preferencia va primero
+      if (Math.abs(bestMorning.mins - preferredMinutes) <= Math.abs(bestAfternoon.mins - preferredMinutes)) {
+        slot1 = bestMorning.slot;
+        slot2 = bestAfternoon.slot;
+      } else {
+        slot1 = bestAfternoon.slot;
+        slot2 = bestMorning.slot;
+      }
+    } else if (bestMorning) {
+      slot1 = bestMorning.slot;
+    } else if (bestAfternoon) {
+      slot1 = bestAfternoon.slot;
+    }
+  } else {
+    // Sin preferencia: primero de la mañana y primero de la tarde
+    const firstMorning = morning.sort((a, b) => a.mins - b.mins)[0];
+    const firstAfternoon = afternoon.sort((a, b) => a.mins - b.mins)[0];
+
+    if (firstMorning && firstAfternoon) {
+      slot1 = firstMorning.slot;
+      slot2 = firstAfternoon.slot;
+    } else if (firstMorning) {
+      slot1 = firstMorning.slot;
+    } else if (firstAfternoon) {
+      slot1 = firstAfternoon.slot;
+    }
+  }
+
+  return [slot1, slot2].filter(Boolean);
+}
+
 async function fetchCleaningAvailability({ date, timezone, preferredTime, toolCallId = "debug" }) {
   const calendarId = SERVICE_CONFIG.cleaning.calendarId;
   const logPrefix = `[ghl_check_cleaning_availability_webhook] toolCallId=${toolCallId}`;
@@ -287,17 +345,8 @@ async function fetchCleaningAvailability({ date, timezone, preferredTime, toolCa
     }
   }
   console.log(`${logPrefix} Slots normalized`, { normalizedCount: normalized.length, sample: normalized.slice(0, 3) });
-  let picked = [];
-  if (preferredMinutes != null) {
-    const scored = normalized.map((slot) => {
-      const slotMins = minutesFromMidnightInTz(slot.start, timezone);
-      const dist = slotMins == null ? Number.POSITIVE_INFINITY : Math.abs(slotMins - preferredMinutes);
-      return { slot, dist };
-    }).sort((a, b) => a.dist - b.dist);
-    picked = scored.slice(0, 2).map((x) => x.slot);
-  } else {
-    picked = normalized.slice(0, 2);
-  }
+  const picked = pickMorningAndAfternoon(normalized, preferredMinutes, timezone);
+  console.log(`${logPrefix} Slots picked (morning/afternoon)`, { picked: picked.map((s) => s.start) });
   const finalResult = { success: true, date, timezone, slots: picked.map((s) => ({ start: s.start })) };
   return { startDate, endDate, payload, dateNode, dateNodeType, dateNodeIsArray, dateNodeKeys, rawSlots, normalized, picked, finalResult };
 }
@@ -354,17 +403,8 @@ async function fetchServiceAvailability({ serviceType, date, timezone, preferred
     }
   }
   console.log(`${logPrefix} Slots normalized`, { normalizedCount: normalized.length, sample: normalized.slice(0, 3) });
-  let picked = [];
-  if (preferredMinutes != null) {
-    const scored = normalized.map((slot) => {
-      const slotMins = minutesFromMidnightInTz(slot.start, timezone);
-      const dist = slotMins == null ? Number.POSITIVE_INFINITY : Math.abs(slotMins - preferredMinutes);
-      return { slot, dist };
-    }).sort((a, b) => a.dist - b.dist);
-    picked = scored.slice(0, 2).map((x) => x.slot);
-  } else {
-    picked = normalized.slice(0, 2);
-  }
+  const picked = pickMorningAndAfternoon(normalized, preferredMinutes, timezone);
+  console.log(`${logPrefix} Slots picked (morning/afternoon)`, { picked: picked.map((s) => s.start) });
   const finalResult = { success: true, serviceType, date, timezone, slots: picked.map((s) => ({ start: s.start })) };
   return { startDate, endDate, payload, dateNode, dateNodeType, dateNodeIsArray, dateNodeKeys, rawSlots, normalized, picked, finalResult };
 }
