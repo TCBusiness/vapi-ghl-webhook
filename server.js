@@ -630,6 +630,61 @@ app.post("/tool-calls", async (req, res) => {
         continue;
       }
 
+      if (name === "ghl_update_appointment_notes_webhook") {
+        const appointmentId = String(args?.appointmentId || "").trim();
+        const insuranceName = String(args?.insuranceName || "").trim();
+        const memberId = String(args?.memberId || "").trim();
+
+        if (!appointmentId) {
+          results.push({ toolCallId, result: { success: false, error: "Missing required argument: appointmentId" } });
+          continue;
+        }
+
+        if (!GHL_API_KEY) {
+          results.push({ toolCallId, result: { success: false, error: "Missing server env var: GHL_API_KEY" } });
+          continue;
+        }
+
+        const noteLines = [];
+        if (insuranceName) noteLines.push(`Insurance: ${insuranceName}`);
+        if (memberId) noteLines.push(`Member ID: ${memberId}`);
+        if (!noteLines.length) noteLines.push("No insurance");
+        const notes = noteLines.join("\n");
+
+        console.log(`[ghl_update_appointment_notes_webhook] appointmentId=${appointmentId} notes=${notes}`);
+
+        try {
+          const ghlResp = await axios.put(
+            `https://services.leadconnectorhq.com/calendars/events/appointments/${appointmentId}`,
+            { notes },
+            {
+              headers: {
+                Authorization: `Bearer ${GHL_API_KEY}`,
+                Version: "2023-02-21",
+                "Content-Type": "application/json",
+              },
+            }
+          );
+
+          console.log("[ghl_update_appointment_notes_webhook] ghlResp.status:", ghlResp.status);
+
+          results.push({
+            toolCallId,
+            result: { success: true, appointmentId, notes },
+          });
+        } catch (error) {
+          const status = error.response?.status || 500;
+          const responseText = typeof error.response?.data === "string"
+            ? error.response.data
+            : JSON.stringify(error.response?.data || error.message);
+          console.log("[ghl_update_appointment_notes_webhook] ghlResp.status:", status);
+          console.log("[ghl_update_appointment_notes_webhook] responseText:", responseText);
+          results.push({ toolCallId, result: { success: false, error: `GHL ${status}: ${responseText}` } });
+        }
+
+        continue;
+      }
+
       results.push({ toolCallId, result: { success: false, error: `Unknown tool: ${name}` } });
     }
     return res.status(200).json({ results });
@@ -676,7 +731,7 @@ async function sendFollowUpSMS(phone) {
     if (!contact) { console.log("❌ Contact not found in GHL"); return; }
     console.log("✅ Contact found:", contact.id);
     await axios.post("https://services.leadconnectorhq.com/conversations/messages",
-      { type: "SMS", contactId: contact.id, message: "Hi 👋 It looks like your call ended before booking was completed. You can schedule here: https://YOUR_BOOKING_LINK.com" },
+      { type: "SMS", contactId: contact.id, message: "Hi 👋 It looks like your call ended before booking was completed. You can schedule here: https://api.leadconnectorhq.com/widget/groups/medicaldentalservices-ae5868da-cbd9-45e1-b2fc-86f9b9f27256" },
       { headers: { Authorization: `Bearer ${GHL_API_KEY}`, Version: "2023-02-21", "Content-Type": "application/json" } }
     );
     console.log("✅ SMS sent successfully");
