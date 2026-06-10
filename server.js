@@ -415,14 +415,26 @@ app.post("/vapi-webhook", async (req, res) => {
   try {
     const body = req.body;
     console.log("📦 Payload:", JSON.stringify(body, null, 2));
+
     const phone = body.message?.call?.customer?.number || body.message?.customer?.number || body.customer?.number;
     console.log("📞 Extracted phone:", phone);
-    if (!phone) { console.log("❌ No phone number found"); return; }
+
     const success = body.message?.analysis?.successEvaluation === "true";
+    const endedReason = body.message?.call?.endedReason || body.message?.endedReason || "unknown";
+    const summary = body.message?.analysis?.summary || "No summary available.";
+
     console.log("✅ successEvaluation:", success);
-    if (success) { console.log("✅ Appointment created. No SMS needed."); return; }
-    console.log("⚠️ Sending follow-up SMS...");
-    await sendFollowUpSMS(phone);
+    console.log("📋 endedReason:", endedReason);
+    console.log("📋 summary:", summary);
+
+    // Siempre notificar a la doctora
+    await sendDoctorNotification({ phone, success, endedReason, summary });
+
+    // Si no hubo booking exitoso, mandar SMS de seguimiento al paciente
+    if (!success && phone) {
+      console.log("⚠️ Sending follow-up SMS to patient...");
+      await sendFollowUpSMS(phone);
+    }
   } catch (err) { console.error("❌ Webhook error:", err.message); }
 });
 
@@ -720,6 +732,33 @@ app.get("/debug/free-slots", async (req, res) => {
     return res.status(500).json({ error: "debug/free-slots failed", details });
   }
 });
+
+async function sendDoctorNotification({ phone, success, endedReason, summary }) {
+  const DOCTOR_CONTACT_ID = "4cO5wZuHHULluTf9H1xz";
+  try {
+    const resultado = success ? "✅ Cita agendada" : "❌ Sin cita";
+    const razon = endedReason === "assistant-forwarded-call"
+      ? "📞 Llamada transferida a la doctora"
+      : endedReason === "customer-ended-call"
+      ? "📵 Paciente colgó"
+      : endedReason === "silence-timed-out"
+      ? "🔇 Llamada terminó por silencio"
+      : `Fin: ${endedReason}`;
+
+    const callerInfo = phone ? `Llamó: ${phone}` : "Número desconocido";
+
+    const message = `🦷 Smart Dental Design — Nueva llamada\n${callerInfo}\nResultado: ${resultado}\n${razon}\n\nResumen:\n${summary}`;
+
+    await axios.post(
+      "https://services.leadconnectorhq.com/conversations/messages",
+      { type: "SMS", contactId: DOCTOR_CONTACT_ID, message },
+      { headers: { Authorization: `Bearer ${GHL_API_KEY}`, Version: "2023-02-21", "Content-Type": "application/json" } }
+    );
+    console.log("✅ Doctor notification sent");
+  } catch (error) {
+    console.error("❌ Doctor notification error:", error.response?.data || error.message);
+  }
+}
 
 async function sendFollowUpSMS(phone) {
   try {
