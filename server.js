@@ -237,15 +237,8 @@ function minutesFromMidnightInTz(iso, tz) {
   } catch { return null; }
 }
 
-/* ===========================
-   SLOT PICKER — mañana y tarde
-   Devuelve máximo 2 slots:
-   1 antes de las 12pm y 1 desde las 12pm.
-   Si solo hay en un bloque, devuelve el mejor disponible.
-   Si hay preferredTime, el slot más cercano va primero.
-=========================== */
 function pickMorningAndAfternoon(normalized, preferredMinutes, timezone) {
-  const NOON = 14 * 60; // 840 minutos — corte a las 2pm para separar mañana y tarde
+  const NOON = 14 * 60;
 
   const withMins = normalized.map((slot) => ({
     slot,
@@ -259,12 +252,10 @@ function pickMorningAndAfternoon(normalized, preferredMinutes, timezone) {
   let slot2 = null;
 
   if (preferredMinutes != null) {
-    // Slot más cercano a la preferencia en cada bloque
     const bestMorning = morning.sort((a, b) => Math.abs(a.mins - preferredMinutes) - Math.abs(b.mins - preferredMinutes))[0];
     const bestAfternoon = afternoon.sort((a, b) => Math.abs(a.mins - preferredMinutes) - Math.abs(b.mins - preferredMinutes))[0];
 
     if (bestMorning && bestAfternoon) {
-      // El más cercano a la preferencia va primero
       if (Math.abs(bestMorning.mins - preferredMinutes) <= Math.abs(bestAfternoon.mins - preferredMinutes)) {
         slot1 = bestMorning.slot;
         slot2 = bestAfternoon.slot;
@@ -278,7 +269,6 @@ function pickMorningAndAfternoon(normalized, preferredMinutes, timezone) {
       slot1 = bestAfternoon.slot;
     }
   } else {
-    // Sin preferencia: primero de la mañana y primero de la tarde
     const firstMorning = morning.sort((a, b) => a.mins - b.mins)[0];
     const firstAfternoon = afternoon.sort((a, b) => a.mins - b.mins)[0];
 
@@ -312,24 +302,12 @@ async function fetchCleaningAvailability({ date, timezone, preferredTime, toolCa
   const endDate = epochMsInTimeZone(date, 18, 0, "America/New_York");
   const preferredMinutes = preferredTime && Number.isFinite(Number(preferredTime.hour)) && Number.isFinite(Number(preferredTime.minute))
     ? Number(preferredTime.hour) * 60 + Number(preferredTime.minute) : null;
-  console.log(`${logPrefix} start/end (ms)`, { startDate, endDate, startDateDigits: String(startDate).length, endDateDigits: String(endDate).length });
-  console.log(`${logPrefix} Checking free slots`, { calendarId, date, timezone, startDate, endDate, preferredTime, preferredMinutes });
   const resp = await axios.get(`https://services.leadconnectorhq.com/calendars/${calendarId}/free-slots`, {
     headers: { Authorization: `Bearer ${GHL_API_KEY}`, Version: "2023-02-21" },
     params: { startDate, endDate, timezone },
   });
   const payload = resp.data || {};
   const rawSlots = collectCandidateArrays(payload, date);
-  console.log(`${logPrefix} Raw response keys`, { topKeys: Object.keys(payload || {}), rawSlotCount: Array.isArray(rawSlots) ? rawSlots.length : 0, rawSlotSample: Array.isArray(rawSlots) ? rawSlots.slice(0, 3) : null });
-  const dateNode = payload?.[date];
-  const dateNodeType = typeof dateNode;
-  const dateNodeIsArray = Array.isArray(dateNode);
-  const dateNodeKeys = dateNode && typeof dateNode === "object" && !Array.isArray(dateNode) ? Object.keys(dateNode) : [];
-  console.log(`${logPrefix} DEBUG payload`, payload);
-  console.log(`${logPrefix} DEBUG payload[date]`, dateNode);
-  console.log(`${logPrefix} DEBUG typeof payload[date]`, dateNodeType);
-  console.log(`${logPrefix} DEBUG Array.isArray(payload[date])`, dateNodeIsArray);
-  if (dateNode && typeof dateNode === "object" && !Array.isArray(dateNode)) console.log(`${logPrefix} DEBUG Object.keys(payload[date])`, dateNodeKeys);
   const normalized = [];
   for (const item of rawSlots) {
     if (item == null) continue;
@@ -344,11 +322,9 @@ async function fetchCleaningAvailability({ date, timezone, preferredTime, toolCa
       if (startIso) normalized.push({ start: startIso });
     }
   }
-  console.log(`${logPrefix} Slots normalized`, { normalizedCount: normalized.length, sample: normalized.slice(0, 3) });
   const picked = pickMorningAndAfternoon(normalized, preferredMinutes, timezone);
-  console.log(`${logPrefix} Slots picked (morning/afternoon)`, { picked: picked.map((s) => s.start) });
   const finalResult = { success: true, date, timezone, slots: picked.map((s) => ({ start: s.start })) };
-  return { startDate, endDate, payload, dateNode, dateNodeType, dateNodeIsArray, dateNodeKeys, rawSlots, normalized, picked, finalResult };
+  return { startDate, endDate, payload, rawSlots, normalized, picked, finalResult };
 }
 
 async function fetchServiceAvailability({ serviceType, date, timezone, preferredTime, toolCallId = "debug" }) {
@@ -370,24 +346,12 @@ async function fetchServiceAvailability({ serviceType, date, timezone, preferred
   const endDate = epochMsInTimeZone(date, 18, 0, "America/New_York");
   const preferredMinutes = preferredTime && Number.isFinite(Number(preferredTime.hour)) && Number.isFinite(Number(preferredTime.minute))
     ? Number(preferredTime.hour) * 60 + Number(preferredTime.minute) : null;
-  console.log(`${logPrefix} start/end (ms)`, { startDate, endDate, startDateDigits: String(startDate).length, endDateDigits: String(endDate).length });
-  console.log(`${logPrefix} Checking free slots`, { calendarId, date, timezone, startDate, endDate, preferredTime, preferredMinutes, durationMinutes: cfg.durationMinutes });
   const resp = await axios.get(`https://services.leadconnectorhq.com/calendars/${calendarId}/free-slots`, {
     headers: { Authorization: `Bearer ${GHL_API_KEY}`, Version: "2023-02-21" },
     params: { startDate, endDate, timezone },
   });
   const payload = resp.data || {};
   const rawSlots = collectCandidateArrays(payload, date);
-  console.log(`${logPrefix} Raw response keys`, { topKeys: Object.keys(payload || {}), rawSlotCount: Array.isArray(rawSlots) ? rawSlots.length : 0, rawSlotSample: Array.isArray(rawSlots) ? rawSlots.slice(0, 3) : null });
-  const dateNode = payload?.[date];
-  const dateNodeType = typeof dateNode;
-  const dateNodeIsArray = Array.isArray(dateNode);
-  const dateNodeKeys = dateNode && typeof dateNode === "object" && !Array.isArray(dateNode) ? Object.keys(dateNode) : [];
-  console.log(`${logPrefix} DEBUG payload`, payload);
-  console.log(`${logPrefix} DEBUG payload[date]`, dateNode);
-  console.log(`${logPrefix} DEBUG typeof payload[date]`, dateNodeType);
-  console.log(`${logPrefix} DEBUG Array.isArray(payload[date])`, dateNodeIsArray);
-  if (dateNode && typeof dateNode === "object" && !Array.isArray(dateNode)) console.log(`${logPrefix} DEBUG Object.keys(payload[date])`, dateNodeKeys);
   const normalized = [];
   for (const item of rawSlots) {
     if (item == null) continue;
@@ -402,11 +366,9 @@ async function fetchServiceAvailability({ serviceType, date, timezone, preferred
       if (startIso) normalized.push({ start: startIso });
     }
   }
-  console.log(`${logPrefix} Slots normalized`, { normalizedCount: normalized.length, sample: normalized.slice(0, 3) });
   const picked = pickMorningAndAfternoon(normalized, preferredMinutes, timezone);
-  console.log(`${logPrefix} Slots picked (morning/afternoon)`, { picked: picked.map((s) => s.start) });
   const finalResult = { success: true, serviceType, date, timezone, slots: picked.map((s) => ({ start: s.start })) };
-  return { startDate, endDate, payload, dateNode, dateNodeType, dateNodeIsArray, dateNodeKeys, rawSlots, normalized, picked, finalResult };
+  return { startDate, endDate, payload, rawSlots, normalized, picked, finalResult };
 }
 
 app.post("/vapi-webhook", async (req, res) => {
@@ -414,8 +376,6 @@ app.post("/vapi-webhook", async (req, res) => {
   res.status(200).json({ received: true });
   try {
     const body = req.body;
-    console.log("📦 Payload:", JSON.stringify(body, null, 2));
-
     const phone = body.message?.call?.customer?.number || body.message?.customer?.number || body.customer?.number;
     console.log("📞 Extracted phone:", phone);
 
@@ -427,10 +387,8 @@ app.post("/vapi-webhook", async (req, res) => {
     console.log("📋 endedReason:", endedReason);
     console.log("📋 summary:", summary);
 
-    // Siempre notificar a la doctora
     await sendDoctorNotification({ phone, success, endedReason, summary });
 
-    // Si no hubo booking exitoso, mandar SMS de seguimiento al paciente
     if (!success && phone) {
       console.log("⚠️ Sending follow-up SMS to patient...");
       await sendFollowUpSMS(phone);
@@ -571,10 +529,6 @@ app.post("/tool-calls", async (req, res) => {
         const startDateTime = String(args?.startDateTime || "").trim();
         const calendarId = String(args?.calendarId || "").trim();
         const timezone = String(args?.timezone || "America/New_York").trim() || "America/New_York";
-        console.log("[booking] function.name:", name);
-        console.log("[booking] contactId:", contactId);
-        console.log("[booking] calendarId:", calendarId);
-        console.log("[booking] startDateTime:", startDateTime);
         if (!contactId) { results.push({ toolCallId, result: { success: false, error: "Missing required argument: contactId" } }); continue; }
         if (!startDateTime) { results.push({ toolCallId, result: { success: false, error: "Missing required argument: startDateTime" } }); continue; }
         if (!calendarId) { results.push({ toolCallId, result: { success: false, error: "Missing required argument: calendarId" } }); continue; }
@@ -593,15 +547,12 @@ app.post("/tool-calls", async (req, res) => {
             headers: { Authorization: `Bearer ${GHL_API_KEY}`, Version: "2023-02-21", "Content-Type": "application/json" },
           });
           console.log("[booking] ghlResp.status:", ghlResp.status);
-          console.log("[booking] responseText:", JSON.stringify(ghlResp.data || {}, null, 2));
           const responseJson = ghlResp.data || {};
           const appointmentId = responseJson?.id || responseJson?.appointment?.id || responseJson?.event?.id || responseJson?.data?.id || "";
           results.push({ toolCallId, result: { success: true, appointmentId, calendarId, startDateTime, timezone } });
         } catch (error) {
           const status = error.response?.status || 500;
           const responseText = typeof error.response?.data === "string" ? error.response.data : JSON.stringify(error.response?.data || error.message);
-          console.log("[booking] ghlResp.status:", status);
-          console.log("[booking] responseText:", responseText);
           results.push({ toolCallId, result: { success: false, error: `GHL ${status}: ${responseText}` } });
         }
         continue;
@@ -646,54 +597,27 @@ app.post("/tool-calls", async (req, res) => {
         const appointmentId = String(args?.appointmentId || "").trim();
         const insuranceName = String(args?.insuranceName || "").trim();
         const memberId = String(args?.memberId || "").trim();
-
-        if (!appointmentId) {
-          results.push({ toolCallId, result: { success: false, error: "Missing required argument: appointmentId" } });
-          continue;
-        }
-
-        if (!GHL_API_KEY) {
-          results.push({ toolCallId, result: { success: false, error: "Missing server env var: GHL_API_KEY" } });
-          continue;
-        }
-
+        if (!appointmentId) { results.push({ toolCallId, result: { success: false, error: "Missing required argument: appointmentId" } }); continue; }
+        if (!GHL_API_KEY) { results.push({ toolCallId, result: { success: false, error: "Missing server env var: GHL_API_KEY" } }); continue; }
         const noteLines = [];
         if (insuranceName) noteLines.push(`Insurance: ${insuranceName}`);
         if (memberId) noteLines.push(`Member ID: ${memberId}`);
         if (!noteLines.length) noteLines.push("No insurance");
         const notes = noteLines.join("\n");
-
         console.log(`[ghl_update_appointment_notes_webhook] appointmentId=${appointmentId} notes=${notes}`);
-
         try {
           const ghlResp = await axios.put(
             `https://services.leadconnectorhq.com/calendars/events/appointments/${appointmentId}`,
             { notes },
-            {
-              headers: {
-                Authorization: `Bearer ${GHL_API_KEY}`,
-                Version: "2023-02-21",
-                "Content-Type": "application/json",
-              },
-            }
+            { headers: { Authorization: `Bearer ${GHL_API_KEY}`, Version: "2023-02-21", "Content-Type": "application/json" } }
           );
-
           console.log("[ghl_update_appointment_notes_webhook] ghlResp.status:", ghlResp.status);
-
-          results.push({
-            toolCallId,
-            result: { success: true, appointmentId, notes },
-          });
+          results.push({ toolCallId, result: { success: true, appointmentId, notes } });
         } catch (error) {
           const status = error.response?.status || 500;
-          const responseText = typeof error.response?.data === "string"
-            ? error.response.data
-            : JSON.stringify(error.response?.data || error.message);
-          console.log("[ghl_update_appointment_notes_webhook] ghlResp.status:", status);
-          console.log("[ghl_update_appointment_notes_webhook] responseText:", responseText);
+          const responseText = typeof error.response?.data === "string" ? error.response.data : JSON.stringify(error.response?.data || error.message);
           results.push({ toolCallId, result: { success: false, error: `GHL ${status}: ${responseText}` } });
         }
-
         continue;
       }
 
@@ -719,14 +643,7 @@ app.get("/debug/free-slots", async (req, res) => {
     const minute = req.query.minute !== undefined && req.query.minute !== "" ? Number(req.query.minute) : null;
     const preferredTime = hour != null && minute != null && Number.isFinite(hour) && Number.isFinite(minute) ? { hour: Number(hour), minute: Number(minute) } : null;
     const availability = await fetchCleaningAvailability({ date, timezone, preferredTime, toolCallId: "debug-endpoint" });
-    return res.status(200).json({
-      date, timezone, preferredTime,
-      startDate: availability.startDate, endDate: availability.endDate,
-      rawPayload: availability.payload, dateNode: availability.dateNode,
-      dateNodeType: availability.dateNodeType, dateNodeIsArray: availability.dateNodeIsArray,
-      dateNodeKeys: availability.dateNodeKeys, rawSlots: availability.rawSlots,
-      normalized: availability.normalized, picked: availability.picked, finalResult: availability.finalResult,
-    });
+    return res.status(200).json({ date, timezone, preferredTime, finalResult: availability.finalResult });
   } catch (error) {
     const details = error.response?.data || error.message;
     return res.status(500).json({ error: "debug/free-slots failed", details });
@@ -734,7 +651,7 @@ app.get("/debug/free-slots", async (req, res) => {
 });
 
 async function sendDoctorNotification({ phone, success, endedReason, summary }) {
-  const DOCTOR_CONTACT_ID = "4cO5wZuHHULluTf9H1xz";
+  const DOCTOR_CONTACT_ID = "uRv2HXR6lc247R6bEsjo";
   try {
     const resultado = success ? "✅ Cita agendada" : "❌ Sin cita";
     const razon = endedReason === "assistant-forwarded-call"
@@ -744,11 +661,8 @@ async function sendDoctorNotification({ phone, success, endedReason, summary }) 
       : endedReason === "silence-timed-out"
       ? "🔇 Llamada terminó por silencio"
       : `Fin: ${endedReason}`;
-
     const callerInfo = phone ? `Llamó: ${phone}` : "Número desconocido";
-
     const message = `🦷 Smart Dental Design — Nueva llamada\n${callerInfo}\nResultado: ${resultado}\n${razon}\n\nResumen:\n${summary}`;
-
     await axios.post(
       "https://services.leadconnectorhq.com/conversations/messages",
       { type: "SMS", contactId: DOCTOR_CONTACT_ID, message },
