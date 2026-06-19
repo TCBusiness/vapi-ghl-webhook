@@ -650,6 +650,53 @@ app.get("/debug/free-slots", async (req, res) => {
   }
 });
 
+// ─── OUTBOUND CALL ENDPOINT ───────────────────────────────────────────────────
+// GHL Workflow dispara este endpoint cuando un contacto responde SÍ/SI/YES
+// al SMS de la campaña promocional. Este endpoint inicia una llamada outbound
+// con el assistant Diana Outbound (promo $99).
+app.post("/outbound-call", async (req, res) => {
+  console.log("📲 /outbound-call received:", JSON.stringify(req.body));
+  try {
+    const { phone, contactId, name } = req.body;
+
+    if (!phone) {
+      return res.status(400).json({ success: false, error: "Missing phone" });
+    }
+
+    const phoneE164 = toE164(phone);
+    if (!phoneE164) {
+      return res.status(400).json({ success: false, error: "Invalid phone number" });
+    }
+
+    const vapiResp = await axios.post(
+      "https://api.vapi.ai/call",
+      {
+        assistantId: "48b2df4e-9f4d-48d3-a233-5eea4a2886aa",
+        phoneNumberId: "05312ade-da7c-48bd-97d4-d0dc9e20334d",
+        customer: {
+          number: phoneE164,
+          name: name || "",
+        },
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${process.env.VAPI_API_KEY}`,
+          "Content-Type": "application/json",
+        },
+      }
+    );
+
+    console.log("✅ Vapi outbound call created:", vapiResp.data?.id);
+    return res.status(200).json({ success: true, callId: vapiResp.data?.id });
+
+  } catch (error) {
+    const details = error.response?.data || error.message;
+    console.error("❌ /outbound-call error:", details);
+    return res.status(500).json({ success: false, error: details });
+  }
+});
+// ─────────────────────────────────────────────────────────────────────────────
+
 async function sendDoctorNotification({ phone, success, endedReason, summary }) {
   const DOCTOR_CONTACT_ID = "uRv2HXR6lc247R6bEsjo";
   try {
