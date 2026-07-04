@@ -16,6 +16,10 @@ const PORT = process.env.PORT || 3000;
 const GHL_API_KEY = process.env.GHL_API_KEY;
 const GHL_LOCATION_ID = process.env.GHL_LOCATION_ID;
 
+// Estados nativos de cita en GHL que significan "ya sabemos qué pasó" —
+// si la cita tiene uno de estos estados, NO se autoriza el SMS de "parece que faltaste".
+const STATUSES_THAT_BLOCK_NOSHOW_SMS = ["showed", "cancelled", "noshow", "invalid"];
+
 const SERVICE_CONFIG = {
   cleaning: {
     calendarId: "rCRM8kaRHJVMqQPJhIDb",
@@ -693,6 +697,84 @@ app.post("/outbound-call", async (req, res) => {
     const details = error.response?.data || error.message;
     console.error("❌ /outbound-call error:", details);
     return res.status(500).json({ success: false, error: details });
+  }
+});
+// ─────────────────────────────────────────────────────────────────────────────
+
+// ─── APPOINTMENT STATUS GATE ──────────────────────────────────────────────────
+// El workflow "24 hours Appointment SMS Reminder" en GHL llama este endpoint
+// en vez de mandar el SMS de "parece que faltaste" directamente. Este endpoint
+// consulta el estado REAL de la cita en GHL antes de autorizar el envío, para
+// no mandarle ese mensaje a un paciente que ya fue marcado como "Showed".
+app.post("/appointment-status-gate", async (req, res) => {
+  try {
+    const { appointmentId, contactId } = req.body;
+
+    if (!appointmentId) {
+      console.error("[appointment-status-gate] falta appointmentId en el body:", req.body);
+      return res.status(400).json({ authorized: false, error: "appointmentId es requerido" });
+    }
+    if (!contactId) {
+      console.error("[appointment-status-gate] falta contactId en el body:", req.body);
+      return res.status(400).json({ authorized: false, error: "contactId es requerido" });
+    }
+    if (!GHL_API_KEY) {
+      return res.status(500).json({ authorized: false, error: "Missing server env var: GHL_API_KEY" });
+    }
+
+    // 1. Consulta el estado real de la cita en GHL
+    let apptData;
+    try {
+      const apptResp = await axios.get(
+        `https://services.leadconnectorhq.com/calendars/events/appointments/${appointmentId}`,
+        { headers: { Authorization: `Bearer ${GHL_API_KEY}`, Version: "2023-02-21" } }
+      );
+      apptData = apptResp.data || {};
+    } catch (error) {
+      const details = error.response?.data || error.message;
+      console.error("[appointment-status-gate] error consultando la cita en GHL:", details);
+      // Si no se puede verificar el estado real, NO se autoriza el envío por seguridad.
+      return res.status(200).json({ authorized: false, reason: "no se pudo verificar el estado", details });
+    }
+
+    // LOG TEMPORAL: dejar activo en las primeras ejecuciones reales para confirmar
+    // el nombre exacto del campo de estado antes de confiar en él sin supervisión.
+    console.log("[appointment-status-gate] respuesta completa de la cita:", JSON.stringify(apptData, null, 2));
+
+    const status = apptData?.appointmentStatus || apptData?.appointment?.appointmentStatus || apptData?.data?.appointmentStatus;
+
+    if (!status) {
+      console.error("[appointment-status-gate] no se encontró appointmentStatus en la respuesta — revisa el log completo arriba.");
+      return res.status(200).json({ authorized: false, reason: "campo de estado no encontrado" });
+    }
+
+    const shouldBlock = STATUSES_THAT_BLOCK_NOSHOW_SMS.includes(String(status).toLowerCase());
+
+    if (shouldBlock) {
+      console.log(`[appointment-status-gate] cita ${appointmentId} con estado "${status}" — SMS de no-show BLOQUEADO.`);
+      return res.status(200).json({ authorized: false, status });
+    }
+
+    // 2. Estado sigue sin resolución real (ej. "confirmed" sin check-in) → autoriza y envía el SMS
+    const smsBody =
+      "Hi, it seems we missed your appointment. Would you like to reschedule it? Please let us know your preferred timing. Call this number to reschedule: +1 (561) 431-9531. Best regards, Smart Dental Design";
+
+    try {
+      await axios.post(
+        "https://services.leadconnectorhq.com/conversations/messages",
+        { type: "SMS", contactId, message: smsBody },
+        { headers: { Authorization: `Bearer ${GHL_API_KEY}`, Version: "2023-02-21", "Content-Type": "application/json" } }
+      );
+      console.log(`[appointment-status-gate] SMS de no-show enviado a contacto ${contactId} (cita ${appointmentId}, estado "${status}")`);
+      return res.status(200).json({ authorized: true, sent: true, status });
+    } catch (error) {
+      const details = error.response?.data || error.message;
+      console.error("[appointment-status-gate] error enviando el SMS:", details);
+      return res.status(200).json({ authorized: true, sent: false, status, error: details });
+    }
+  } catch (err) {
+    console.error("❌ /appointment-status-gate error:", err.message);
+    return res.status(500).json({ authorized: false, error: err.message });
   }
 });
 // ─────────────────────────────────────────────────────────────────────────────
