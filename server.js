@@ -708,7 +708,13 @@ app.post("/outbound-call", async (req, res) => {
 // no mandarle ese mensaje a un paciente que ya fue marcado como "Showed".
 app.post("/appointment-status-gate", async (req, res) => {
   try {
-    const { appointmentId, contactId } = req.body;
+    // GHL envuelve los "Custom Data" del nodo Webhook dentro de un objeto
+    // `customData` en vez de mandarlos como campos sueltos en el body.
+    // Este parseo acepta ambas formas, por si el nodo se reconfigura distinto.
+    const body = req.body || {};
+    console.log("[appointment-status-gate] body recibido (para confirmar estructura real de GHL):", JSON.stringify(body, null, 2));
+    const appointmentId = body.appointmentId || body.customData?.appointmentId;
+    const contactId = body.contactId || body.customData?.contactId;
 
     if (!appointmentId) {
       console.error("[appointment-status-gate] falta appointmentId en el body:", req.body);
