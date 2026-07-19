@@ -880,7 +880,7 @@ async function sendDoctorNotification({ phone, success, endedReason, summary }) 
       ? "🔇 Llamada terminó por silencio"
       : `Fin: ${endedReason}`;
     const callerInfo = phone ? `Llamó: ${phone}` : "Número desconocido";
-    const message = `🦷 Smart Dental Design — Nueva llamada\n${callerInfo}\nResultado: ${resultado}\n${razon}\n\nResumen:\n${summary}`;
+    const message = `🦷 Smart Dental Design — Nueva llamada\n${callerInfo}\nResultado: ${resultado}\n${razon}\n\nResumen:\n${String(summary||"").slice(0,150)}`;
     await axios.post(
       "https://services.leadconnectorhq.com/conversations/messages",
       { type: "SMS", contactId: DOCTOR_CONTACT_ID, message },
