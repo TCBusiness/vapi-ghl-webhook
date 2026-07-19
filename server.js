@@ -625,6 +625,89 @@ app.post("/tool-calls", async (req, res) => {
         continue;
       }
 
+        if (name === "ghl_confirm_appointment_webhook") {
+          const DOCTOR_CONTACT_ID = "uRv2HXR6lc247R6bEsjo";
+          const phoneRaw = String(args?.phone || "").trim();
+          const patientName = String(args?.patientName || args?.fullName || "").trim();
+          let contactId = String(args?.contactId || "").trim();
+
+          if (!GHL_API_KEY) {
+            results.push({ toolCallId, result: { success: false, error: "Missing server env var: GHL_API_KEY" } });
+            continue;
+          }
+
+          try {
+            if (!contactId) {
+              const phoneE164 = toE164(phoneRaw);
+              if (!phoneE164) {
+                results.push({ toolCallId, result: { success: false, error: "Missing/invalid phone or contactId" } });
+                continue;
+              }
+              const dupResp = await axios.get("https://services.leadconnectorhq.com/contacts/search/duplicate", {
+                headers: { Authorization: `Bearer ${GHL_API_KEY}`, Version: "2023-02-21" },
+                params: { locationId: GHL_LOCATION_ID, number: phoneE164 },
+              });
+              contactId = dupResp.data?.contact?.id || "";
+              if (!contactId) {
+                results.push({ toolCallId, result: { success: false, found: false, message: "No contact found for that phone" } });
+                continue;
+              }
+            }
+
+            let appt = null;
+            try {
+              const apptResp = await axios.get(
+                `https://services.leadconnectorhq.com/contacts/${contactId}/appointments`,
+                { headers: { Authorization: `Bearer ${GHL_API_KEY}`, Version: "2021-04-15" } }
+              );
+              const events = apptResp.data?.events || apptResp.data?.appointments || [];
+              const nowMs = Date.now();
+              const withTime = events
+                .map((e) => ({ e, t: new Date(e.startTime || e.startDate || e.start).getTime() }))
+                .filter((x) => !Number.isNaN(x.t));
+              const upcoming = withTime.filter((x) => x.t >= nowMs - 3600000).sort((a, b) => a.t - b.t);
+              appt = (upcoming[0] || withTime.sort((a, b) => b.t - a.t)[0] || null);
+              appt = appt ? appt.e : null;
+            } catch (e) {
+              console.error(`[ghl_confirm_appointment_webhook] appt lookup failed:`, e.response?.data || e.message);
+            }
+
+            let whenText = "su próxima cita";
+            if (appt) {
+              const startIso = appt.startTime || appt.startDate || appt.start;
+              try {
+                whenText = new Intl.DateTimeFormat("es-US", {
+                  timeZone: "America/New_York",
+                  weekday: "long", month: "long", day: "numeric",
+                  hour: "numeric", minute: "2-digit",
+                }).format(new Date(startIso));
+              } catch { /* deja whenText genérico */ }
+            }
+
+            const doctorMsg =
+              `🦷 Smart Dental Design — Confirmación de cita\n` +
+              `El paciente ${patientName || "(sin nombre)"} está CONFIRMANDO su cita: ${whenText}.` +
+              (appt ? "" : `\n(No se encontró la cita en el calendario — verificar.)`);
+
+            await axios.post(
+              "https://services.leadconnectorhq.com/conversations/messages",
+              { type: "SMS", contactId: DOCTOR_CONTACT_ID, message: doctorMsg },
+              { headers: { Authorization: `Bearer ${GHL_API_KEY}`, Version: "2023-02-21", "Content-Type": "application/json" } }
+            );
+            console.log(`[ghl_confirm_appointment_webhook] doctor notified. patient="${patientName}" apptFound=${!!appt}`);
+
+            results.push({
+              toolCallId,
+              result: { success: true, confirmed: true, appointmentFound: !!appt, when: appt ? whenText : null },
+            });
+          } catch (error) {
+            const details = error.response?.data || error.message;
+            console.error(`[ghl_confirm_appointment_webhook] toolCallId=${toolCallId} Error`, details);
+            results.push({ toolCallId, result: { success: false, error: "ghl_confirm_appointment_webhook failed", details } });
+          }
+          continue;
+        }
+
       results.push({ toolCallId, result: { success: false, error: `Unknown tool: ${name}` } });
     }
     return res.status(200).json({ results });
