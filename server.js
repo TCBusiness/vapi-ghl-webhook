@@ -121,6 +121,15 @@ function toE164(phoneRaw) {
   return "";
 }
 
+function parseGhlApptTimeForDisplay(rawTime) {
+  if (!rawTime) return null;
+  const hasExplicitOffset = /Z$|[+-]\d{2}:\d{2}$/.test(rawTime);
+  if (hasExplicitOffset) {
+    return { date: new Date(rawTime), displayTimeZone: "America/New_York" };
+  }
+  return { date: new Date(rawTime + "Z"), displayTimeZone: "UTC" };
+}
+
 function isValidYYYYMMDD(s) {
   if (typeof s !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(s)) return false;
   const [year, month, day] = s.split("-").map(Number);
@@ -676,11 +685,12 @@ app.post("/tool-calls", async (req, res) => {
             if (appt) {
               const startIso = appt.startTime || appt.startDate || appt.start;
               try {
+                const parsed = parseGhlApptTimeForDisplay(startIso);
                 whenText = new Intl.DateTimeFormat("es-US", {
-                  timeZone: "America/New_York",
+                  timeZone: parsed.displayTimeZone,
                   weekday: "long", month: "long", day: "numeric",
                   hour: "numeric", minute: "2-digit",
-                }).format(new Date(startIso));
+                }).format(parsed.date);
               } catch { /* deja whenText genérico */ }
             }
 
@@ -758,7 +768,7 @@ app.post("/tool-calls", async (req, res) => {
                                                 const events = apptResp.data?.events || apptResp.data?.appointments || [];
                                                 const nowMs = Date.now();
                                                 const withTime = events
-                                                                .map((e) => ({ e, t: new Date(e.startTime || e.startDate || e.start).getTime() }))
+                                                                .map((e) => { const parsed = parseGhlApptTimeForDisplay(e.startTime || e.startDate || e.start); return { e, t: parsed ? parsed.date.getTime() : NaN }; })
                                                                 .filter((x) => !Number.isNaN(x.t));
                                                 const upcoming = withTime.filter((x) => x.t >= nowMs - 3600000).sort((a, b) => a.t - b.t);
                                                 appt = (upcoming[0] || withTime.sort((a, b) => b.t - a.t)[0] || null);
